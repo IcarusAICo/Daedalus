@@ -36,7 +36,7 @@ No hard-coded workflows. No brittle selectors. Just vision, reasoning, and a ski
 <p align="center">
   <img src="assets/demo_preview.gif" alt="Daedalus solving a NYT Hard Sudoku" width="600">
   <br>
-  <em>The agent explores an unfamiliar site, learns the UI, writes a solver skill on the fly, and completes the puzzle autonomously. (4x speed)</em>
+  <em>Execution of the final generated program. The agent explored the site, learned the UI, and wrote a sudoku solver — then executed this plan autonomously. (4x speed)</em>
 </p>
 
 ---
