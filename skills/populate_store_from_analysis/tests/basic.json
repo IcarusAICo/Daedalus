@@ -1,0 +1,25 @@
+{
+  "name": "basic",
+  "inputs": {
+    "clicks": [
+      {
+        "x": 100,
+        "y": 200
+      },
+      {
+        "x": 300,
+        "y": 400
+      },
+      {
+        "x": 150,
+        "y": 250
+      }
+    ],
+    "store_table": "click_targets"
+  },
+  "expected_output": {
+    "count": 3,
+    "store_table": "click_targets"
+  },
+  "expected_events": []
+}

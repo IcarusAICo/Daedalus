@@ -1,0 +1,16 @@
+# Grounding service dependencies.
+# Pinned to transformers 4.46.x for Florence-2 remote code compatibility.
+transformers>=4.46.0,<4.50.0
+torch>=2.0.0
+torchvision>=0.15.0
+ultralytics>=8.0.0
+opencv-python-headless>=4.8.0
+numpy>=1.24.0
+Pillow>=9.0.0
+fastapi>=0.100.0
+uvicorn>=0.20.0
+einops>=0.7.0
+timm>=0.9.0
+safetensors>=0.4.0
+accelerate>=0.25.0
+qwen-vl-utils>=0.0.8

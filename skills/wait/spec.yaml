@@ -1,0 +1,18 @@
+id: wait
+version: 0.1.0
+kind: atomic
+description: Sleep for the given number of milliseconds.
+side_effects:
+- clock
+preconditions:
+- ms >= 0
+examples:
+- inputs:
+    ms: 250
+  expected:
+    waited_ms: 250
+tests:
+- basic.json
+tags:
+- timing
+- core

@@ -1,0 +1,55 @@
+id: mouse
+version: 0.1.0
+kind: atomic
+description: 'General-purpose mouse skill: move without clicking, click (left/right/double),
+  or drag from point A to point B.'
+side_effects:
+- screen_input
+preconditions:
+- backend.connected
+- 0 <= x < screen.width
+- 0 <= y < screen.height
+postconditions:
+- cursor.position == (x, y) or cursor.position == (x2, y2) for drag
+examples:
+- inputs:
+    action: move
+    x: 400
+    y: 300
+  expected:
+    action: move
+    position:
+    - 400
+    - 300
+- inputs:
+    action: click
+    x: 100
+    y: 200
+  expected:
+    action: click
+    position:
+    - 100
+    - 200
+    button: left
+    double: false
+- inputs:
+    action: drag
+    x: 100
+    y: 100
+    x2: 500
+    y2: 300
+  expected:
+    action: drag
+    start:
+    - 100
+    - 100
+    end:
+    - 500
+    - 300
+    button: left
+tests:
+- basic.json
+tags:
+- mouse
+- input
+- core

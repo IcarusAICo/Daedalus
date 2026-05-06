@@ -1,0 +1,17 @@
+id: type_text_secret
+version: 0.1.0
+kind: atomic
+description: Type text from an environment variable. The variable name is logged but
+  the actual value never enters program YAML or trace files.
+side_effects:
+- screen_input
+preconditions:
+- backend.connected
+- env_var is set in the process environment
+tags:
+- keyboard
+- input
+- secret
+- core
+sensitive_inputs:
+- env_var

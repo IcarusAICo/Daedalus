@@ -1,0 +1,30 @@
+id: monitor_text_region
+version: 0.1.0
+kind: daemon
+description: Periodically captures a screen region and asks the vision LLM what text
+  it contains. Publishes {text, captured_at} to task_state[key].
+side_effects:
+- screen_capture
+- llm_call
+- task_state_write
+preconditions:
+- backend.connected
+- ctx.llm is configured with a vision role
+- interval_ms >= 200
+examples:
+- inputs:
+    key: current_score
+    region:
+      x: 1200
+      y: 60
+      width: 200
+      height: 50
+    interval_ms: 1000
+requires:
+- view_screen
+publishes_state_key: monitored_text
+self_publishes: true
+tags:
+- daemon
+- vision
+- monitoring

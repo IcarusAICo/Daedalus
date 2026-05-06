@@ -1,0 +1,10 @@
+{
+  "name": "basic",
+  "inputs": {
+    "prompt": "What do you see on the screen?"
+  },
+  "expected_output": {
+    "response": "[no llm configured]"
+  },
+  "expected_events": []
+}

@@ -1,0 +1,105 @@
+id: solve_sudoku
+version: 0.1.0
+kind: atomic
+description: Solves a 9x9 Sudoku puzzle using backtracking. Input is a 9x9 grid as
+  a list of 9 lists of 9 integers (0 = empty). Returns the solved grid or null if
+  unsolvable.
+preconditions:
+- len(grid) == 9
+- all(len(row) == 9 for row in grid)
+- all(0 <= cell <= 9 for row in grid for cell in row)
+postconditions:
+- solved is None or (len(solved) == 9 and all(len(r) == 9 for r in solved))
+examples:
+- inputs:
+    grid:
+    - - 0
+      - 0
+      - 0
+      - 0
+      - 0
+      - 0
+      - 0
+      - 0
+      - 3
+    - - 0
+      - 0
+      - 8
+      - 6
+      - 0
+      - 1
+      - 0
+      - 2
+      - 0
+    - - 0
+      - 0
+      - 0
+      - 3
+      - 0
+      - 0
+      - 4
+      - 0
+      - 0
+    - - 0
+      - 7
+      - 0
+      - 0
+      - 0
+      - 0
+      - 0
+      - 5
+      - 0
+    - - 9
+      - 0
+      - 1
+      - 2
+      - 0
+      - 0
+      - 0
+      - 0
+      - 0
+    - - 4
+      - 0
+      - 0
+      - 8
+      - 0
+      - 6
+      - 0
+      - 3
+      - 0
+    - - 0
+      - 5
+      - 4
+      - 7
+      - 0
+      - 0
+      - 0
+      - 0
+      - 0
+    - - 1
+      - 0
+      - 0
+      - 0
+      - 0
+      - 0
+      - 0
+      - 6
+      - 0
+    - - 0
+      - 0
+      - 6
+      - 0
+      - 0
+      - 4
+      - 7
+      - 0
+      - 0
+  note: Classic Sudoku puzzle.
+tests:
+- basic.json
+- unsolvable.json
+tags:
+- puzzle
+- sudoku
+- solver
+- algorithm

@@ -1,0 +1,9 @@
+{
+  "name": "full_screen_capture",
+  "inputs": {},
+  "ignore_output_keys": ["image_path", "captured_at"],
+  "expected_output": {"width": 1920, "height": 1080},
+  "expected_events": [
+    {"op": "screenshot"}
+  ]
+}

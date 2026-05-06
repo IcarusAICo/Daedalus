@@ -1,0 +1,23 @@
+name: "Open Notepad and type hello"
+description: |
+  Phase 1 target. Opens the Run dialog (Win+R), launches notepad,
+  types "hello", and snapshots the result. Requires a Windows host with a
+  running VNC server -- see scripts/setup_vnc_host.md.
+steps:
+  - skill: type_shortcut
+    inputs: {keys: ["super", "r"]}
+    description: Open the Run dialog.
+  - skill: wait
+    inputs: {ms: 500}
+  - skill: type_text
+    inputs: {text: "notepad"}
+  - skill: type_shortcut
+    inputs: {keys: ["enter"]}
+  - skill: wait
+    inputs: {ms: 1500}
+    description: Give Notepad time to open.
+  - skill: type_text
+    inputs: {text: "hello"}
+  - skill: view_screen
+    inputs: {}
+    description: Snapshot to verify.

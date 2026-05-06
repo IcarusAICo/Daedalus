@@ -1,0 +1,17 @@
+name: "Open File Explorer"
+description: |
+  First end-to-end test. Sends Win+E to the Windows target to open
+  File Explorer, waits for it to appear, and takes a screenshot to verify.
+steps:
+  - skill: view_screen
+    inputs: {}
+    description: Capture the desktop before we start.
+  - skill: type_shortcut
+    inputs: {keys: ["super", "e"]}
+    description: Win+E opens File Explorer on Windows.
+  - skill: wait
+    inputs: {ms: 2000}
+    description: Give File Explorer time to open.
+  - skill: view_screen
+    inputs: {}
+    description: Capture the result — File Explorer should be visible.

@@ -1,0 +1,29 @@
+[
+  {
+    "name": "single_shortcut",
+    "inputs": {"keys": ["ctrl", "c"]},
+    "expected_output": {"count": 1, "shortcuts_pressed": [["ctrl", "c"]]},
+    "expected_events": [
+      {"op": "press", "args": {"keys": ["ctrl", "c"]}}
+    ]
+  },
+  {
+    "name": "multiple_shortcuts",
+    "inputs": {"keys": [["ctrl", "a"], ["ctrl", "c"]]},
+    "expected_output": {"count": 2, "shortcuts_pressed": [["ctrl", "a"], ["ctrl", "c"]]},
+    "expected_events": [
+      {"op": "press", "args": {"keys": ["ctrl", "a"]}},
+      {"op": "press", "args": {"keys": ["ctrl", "c"]}}
+    ]
+  },
+  {
+    "name": "repeated_key",
+    "inputs": {"keys": [["Left"], ["Left"], ["Left"]]},
+    "expected_output": {"count": 3, "shortcuts_pressed": [["Left"], ["Left"], ["Left"]]},
+    "expected_events": [
+      {"op": "press", "args": {"keys": ["Left"]}},
+      {"op": "press", "args": {"keys": ["Left"]}},
+      {"op": "press", "args": {"keys": ["Left"]}}
+    ]
+  }
+]

@@ -1,0 +1,22 @@
+id: tick_counter
+version: 0.1.0
+kind: daemon
+description: Long-running daemon that increments a counter at a fixed cadence and
+  publishes the current value (and elapsed time) to task_state[key].
+side_effects:
+- clock
+- task_state_write
+preconditions:
+- interval_ms > 0
+postconditions:
+- task_state[key].count >= 1 once daemon has been running for >= interval_ms
+examples:
+- inputs:
+    key: tick
+    interval_ms: 100
+publishes_state_key: tick
+self_publishes: true
+tags:
+- daemon
+- heartbeat
+- core

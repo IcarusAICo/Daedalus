@@ -1,0 +1,23 @@
+name: "mock smoke test"
+description: |
+  Exercises every Phase 0 base skill against the in-memory MockBackend. Safe
+  to run any time -- nothing leaves the agent process.
+steps:
+  - skill: view_screen
+    inputs: {save_to_trace: false}
+    description: Take a screenshot.
+  - skill: click_mouse
+    inputs: {x: 100, y: 200}
+    description: Click somewhere.
+  - skill: type_text
+    inputs: {text: "hello world"}
+    description: Type some text.
+  - skill: type_shortcut
+    inputs: {keys: ["ctrl", "s"]}
+    description: Save (Ctrl-S).
+  - skill: wait
+    inputs: {ms: 50}
+    description: Pause briefly.
+  - skill: view_screen
+    inputs: {save_to_trace: true}
+    description: Capture final state.

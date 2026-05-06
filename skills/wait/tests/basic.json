@@ -1,0 +1,7 @@
+{
+  "name": "short_wait",
+  "inputs": {"ms": 10},
+  "ignore_output_keys": ["waited_ms"],
+  "expected_output": {},
+  "expected_events": []
+}

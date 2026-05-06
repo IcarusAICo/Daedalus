@@ -1,0 +1,26 @@
+name: "Open Notepad and verify hello typed"
+description: |
+  Phase 1 end-to-end target. Opens Notepad on a Windows host, types "hello",
+  and asks the vision model to verify the result. Requires:
+    - a VNC server on the host (see scripts/setup_vnc_host.md)
+    - LLM config with a vision-capable role (see config.example.yaml)
+steps:
+  - skill: type_shortcut
+    inputs: {keys: ["super", "r"]}
+    description: Open the Run dialog.
+  - skill: wait
+    inputs: {ms: 500}
+  - skill: type_text
+    inputs: {text: "notepad"}
+  - skill: type_shortcut
+    inputs: {keys: ["enter"]}
+  - skill: wait
+    inputs: {ms: 1500}
+  - skill: type_text
+    inputs: {text: "hello"}
+  - skill: wait
+    inputs: {ms: 300}
+  - skill: assert_screen_contains
+    inputs:
+      claim: "Notepad is open in the foreground and the visible text contains 'hello'"
+    description: Vision-model verification of the end state.

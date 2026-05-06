@@ -1,0 +1,28 @@
+id: store_query
+version: 0.1.0
+kind: atomic
+description: Ask a vision LLM to extract structured data from the current screen and
+  store it in a RunStore table. The LLM returns a JSON array of objects; each object
+  becomes a row.
+side_effects:
+- screen_capture
+- network
+- task_state_write
+preconditions:
+- backend.connected
+postconditions:
+- store table populated with extracted data
+examples:
+- inputs:
+    question: Identify every clickable grid edge. Return each as {x, y, orientation}.
+    store_table: grid_edges
+    schema_hint:
+      x: int
+      y: int
+      orientation: str
+  note: Extract grid edge positions from a puzzle screenshot.
+tags:
+- vision
+- store
+- extraction
+- core

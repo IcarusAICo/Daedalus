@@ -1,0 +1,19 @@
+id: type_text
+version: 0.1.0
+kind: atomic
+description: Type a literal text string at the current focus.
+side_effects:
+- screen_input
+preconditions:
+- backend.connected
+examples:
+- inputs:
+    text: hello world
+  expected:
+    chars_typed: 11
+tests:
+- basic.json
+tags:
+- keyboard
+- input
+- core

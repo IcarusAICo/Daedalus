@@ -1,0 +1,25 @@
+id: assert_screen_contains
+version: 0.1.0
+kind: atomic
+description: 'Vision-LM-backed visual assertion: captures the screen and asks the
+  vision model whether `claim` is true. Returns verdict + confidence.'
+side_effects:
+- screen_capture
+- llm_call
+- task_state_write
+preconditions:
+- backend.connected
+- ctx.llm is configured with a vision role
+postconditions:
+- verdict in {true, false}
+examples:
+- inputs:
+    claim: Notepad is open with the text 'hello' visible
+  note: Verify Notepad opened and we typed correctly.
+requires:
+- view_screen
+tags:
+- vision
+- verification
+- assertion
+- core

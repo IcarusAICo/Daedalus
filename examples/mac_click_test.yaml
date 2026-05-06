@@ -1,0 +1,29 @@
+name: "Mouse click test (macOS)"
+description: |
+  Minimal smoke test to verify VNC mouse control works on macOS.
+  Opens Spotlight (Cmd+Space), types "TextEdit", opens it, clicks in the
+  editor area, and types "click test ok". Verifies the full chain:
+  connect → move → click → type → screenshot.
+steps:
+  - skill: type_shortcut
+    inputs: {keys: ["super", "space"]}
+    description: Open Spotlight search.
+  - skill: wait
+    inputs: {ms: 800}
+  - skill: type_text
+    inputs: {text: "TextEdit"}
+  - skill: type_shortcut
+    inputs: {keys: ["enter"]}
+  - skill: wait
+    inputs: {ms: 2000}
+    description: Wait for TextEdit to open.
+  - skill: click_mouse
+    inputs: {x: 864, y: 558}
+    description: Click roughly at screen center to focus the editor.
+  - skill: wait
+    inputs: {ms: 300}
+  - skill: type_text
+    inputs: {text: "click test ok"}
+  - skill: view_screen
+    inputs: {}
+    description: Capture screenshot to verify text was typed.

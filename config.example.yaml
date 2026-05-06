@@ -1,0 +1,57 @@
+# Example daedalus configuration. Copy to config.local.yaml to customize.
+
+backend:
+  kind: vnc          # vnc | mock
+  host_os: windows   # windows | macos | linux — tells the planner which shortcuts to use
+  vnc:
+    host: 127.0.0.1
+    port: 5900
+    password_env: DAEDALUS_VNC_PASSWORD   # name of an env var holding the password
+    # username_env: DAEDALUS_VNC_USERNAME # needed for macOS ARD auth
+    # max_width: 1920    # downscale screenshots to this width (for Retina displays)
+    # max_height: 1080   # downscale screenshots to this height
+
+llm:
+  # role -> litellm model identifier
+  # See https://docs.litellm.ai/docs/providers
+  roles:
+    planner:     bedrock/anthropic.claude-sonnet-4-20250514-v1:0
+    explorer:    bedrock/anthropic.claude-sonnet-4-20250514-v1:0
+    implementor: bedrock/anthropic.claude-sonnet-4-20250514-v1:0
+    learner:     bedrock/anthropic.claude-sonnet-4-20250514-v1:0
+    vision:      bedrock/anthropic.claude-sonnet-4-20250514-v1:0
+    cheap:       bedrock/anthropic.claude-haiku-4-20250514-v1:0
+  # AWS creds resolved via the standard chain (env, ~/.aws, IMDS).
+  aws_region: us-east-1
+  request_timeout_s: 120
+  max_retries: 3
+  creative_temperature: 0.7
+  analytical_temperature: 0.0
+
+paths:
+  skills_dir: skills
+  traces_dir: traces
+  tasks_db: tasks.db
+
+executor:
+  default_screen_width: 1920
+  default_screen_height: 1080
+  step_timeout_s: 30
+
+agent:
+  max_retries: 3       # learner retry loops on failure
+  explore_steps: 20    # max explorer iterations
+  no_explore: false    # skip exploration phase
+  no_strategy: false   # skip strategy phase
+  verbose: false
+  record: false        # record screen via ffmpeg
+  record_fps: 30
+  yolo: false          # auto-approve all plans, skills, and success criteria
+
+ui:
+  overlay: true
+  confirm: true
+
+grounding:
+  endpoint: http://localhost:8420
+  timeout_s: 5

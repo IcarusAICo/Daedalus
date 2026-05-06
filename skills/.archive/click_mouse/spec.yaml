@@ -1,0 +1,28 @@
+id: click_mouse
+version: 0.1.0
+kind: atomic
+description: Click the mouse at an absolute screen pixel.
+side_effects:
+- screen_input
+preconditions:
+- backend.connected
+- 0 <= x < screen.width
+- 0 <= y < screen.height
+postconditions:
+- cursor.position == (x, y)
+examples:
+- inputs:
+    x: 100
+    y: 200
+  expected:
+    clicked_at:
+    - 100
+    - 200
+    button: left
+    double: false
+tests:
+- basic.json
+tags:
+- mouse
+- input
+- core

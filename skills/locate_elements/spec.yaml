@@ -1,0 +1,24 @@
+id: locate_elements
+version: 0.1.0
+kind: atomic
+description: Find ALL UI elements matching a description and store them in the RunStore.
+  Each match gets a row with x, y, label, and confidence.
+side_effects:
+- screen_capture
+- network
+- task_state_write
+preconditions:
+- backend.connected
+postconditions:
+- store table populated with matching elements
+examples:
+- inputs:
+    description: clickable grid edge
+    store_table: edges
+  note: Find all clickable grid edges and store in 'edges' table.
+tags:
+- grounding
+- vision
+- coordinates
+- store
+- core

@@ -1,0 +1,8 @@
+{
+  "name": "basic_left_click",
+  "inputs": {"x": 100, "y": 200},
+  "expected_output": {"clicked_at": [100, 200], "button": "left", "double": false},
+  "expected_events": [
+    {"op": "click", "args": {"x": 100, "y": 200, "button": "left", "double": false}}
+  ]
+}

@@ -1,0 +1,25 @@
+name: "Open Finder on macOS"
+description: |
+  First macOS test. Sends Cmd+Space to open Spotlight, types "Finder",
+  presses Enter, waits, and takes a screenshot.
+steps:
+  - skill: view_screen
+    inputs: {}
+    description: Capture the desktop before we start.
+  - skill: type_shortcut
+    inputs: {keys: ["super", "space"]}
+    description: Cmd+Space opens Spotlight on macOS.
+  - skill: wait
+    inputs: {ms: 800}
+    description: Wait for Spotlight to appear.
+  - skill: type_text
+    inputs: {text: "Finder"}
+  - skill: type_shortcut
+    inputs: {keys: ["enter"]}
+    description: Launch Finder.
+  - skill: wait
+    inputs: {ms: 1500}
+    description: Give Finder time to open.
+  - skill: view_screen
+    inputs: {}
+    description: Capture the result — Finder should be visible.

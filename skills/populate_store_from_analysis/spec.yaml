@@ -1,0 +1,15 @@
+id: populate_store_from_analysis
+version: 0.1.0
+kind: atomic
+description: Takes a list of {x,y} click coordinates and writes them into a RunStore
+  table so click_all can consume them.
+preconditions:
+- inputs.clicks is a list of {x, y} dicts
+postconditions:
+- store table contains all input coordinates
+tests:
+- basic.json
+tags:
+- store
+- data
+- bridge

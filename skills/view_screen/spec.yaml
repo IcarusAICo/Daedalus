@@ -1,0 +1,23 @@
+id: view_screen
+version: 0.3.0
+kind: atomic
+description: Capture the current screen and save it as a PNG file. Returns the file
+  path, width, and height. The image is downscaled to the LLM's internal processing
+  resolution so that all coordinates are consistent across vision skills.
+side_effects:
+- screen_capture
+- filesystem_write
+- task_state_write
+preconditions:
+- backend.connected
+postconditions:
+- image_path exists on disk
+examples:
+- inputs: {}
+  note: Capture the entire screen.
+tests:
+- basic.json
+tags:
+- screen
+- capture
+- core

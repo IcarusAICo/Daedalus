@@ -1,0 +1,42 @@
+[
+  {
+    "name": "move_cursor",
+    "inputs": {"action": "move", "x": 400, "y": 300},
+    "expected_output": {"action": "move", "position": [400, 300]},
+    "expected_events": [
+      {"op": "move", "args": {"x": 400, "y": 300}}
+    ]
+  },
+  {
+    "name": "left_click",
+    "inputs": {"action": "click", "x": 100, "y": 200},
+    "expected_output": {"action": "click", "position": [100, 200], "button": "left", "double": false},
+    "expected_events": [
+      {"op": "click", "args": {"x": 100, "y": 200, "button": "left", "double": false}}
+    ]
+  },
+  {
+    "name": "right_click",
+    "inputs": {"action": "click", "x": 50, "y": 50, "button": "right"},
+    "expected_output": {"action": "click", "position": [50, 50], "button": "right", "double": false},
+    "expected_events": [
+      {"op": "click", "args": {"x": 50, "y": 50, "button": "right", "double": false}}
+    ]
+  },
+  {
+    "name": "double_click",
+    "inputs": {"action": "click", "x": 300, "y": 100, "double": true},
+    "expected_output": {"action": "click", "position": [300, 100], "button": "left", "double": true},
+    "expected_events": [
+      {"op": "click", "args": {"x": 300, "y": 100, "button": "left", "double": true}}
+    ]
+  },
+  {
+    "name": "drag_left_button",
+    "inputs": {"action": "drag", "x": 100, "y": 100, "x2": 500, "y2": 300},
+    "expected_output": {"action": "drag", "start": [100, 100], "end": [500, 300], "button": "left"},
+    "expected_events": [
+      {"op": "drag", "args": {"x1": 100, "y1": 100, "x2": 500, "y2": 300, "button": "left"}}
+    ]
+  }
+]

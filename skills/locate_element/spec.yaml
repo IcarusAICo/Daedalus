@@ -1,0 +1,25 @@
+id: locate_element
+version: 0.1.0
+kind: atomic
+description: Locate a UI element by natural-language description. Captures the screen,
+  sends it to the grounding service, and returns coordinates/bounding box.
+side_effects:
+- screen_capture
+- network
+preconditions:
+- backend.connected
+postconditions:
+- found implies x and y are set
+examples:
+- inputs:
+    description: submit button
+  note: Find the submit button and return its center coordinates.
+- inputs:
+    description: close X icon
+    mode: box
+  note: Find the close button and return its bounding box.
+tags:
+- grounding
+- vision
+- coordinates
+- core

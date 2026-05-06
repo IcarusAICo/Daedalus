@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# Node
+node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Project runtime artifacts
+traces/
+backup/
+tasks.db
+tasks.db-journal
+memory.db
+*.db-shm
+*.db-wal
+.daedalus/
+
+# Test screenshots (contain desktop captures)
+test_*.png
+
+# Machine-specific configs (use config.example.yaml as template)
+config.local.yaml
+config.mac.yaml
+
+# Model weights (too large for git; download separately)
+services/grounding/weights/
+
+# Secrets
+.env
+.env.local
+*.pem
+credentials.json

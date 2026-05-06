@@ -1,0 +1,28 @@
+id: click_element
+version: 0.1.0
+kind: atomic
+description: Locate a UI element by natural-language description and click it. Combines
+  grounding + click in one step so coordinates are resolved dynamically at runtime,
+  never hardcoded.
+side_effects:
+- screen_capture
+- screen_input
+- network
+preconditions:
+- backend.connected
+postconditions:
+- found implies click was performed at element center
+examples:
+- inputs:
+    description: submit button
+  note: Find and left-click the submit button.
+- inputs:
+    description: close X icon
+    button: right
+  note: Right-click the close icon.
+tags:
+- mouse
+- grounding
+- vision
+- input
+- core

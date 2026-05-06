@@ -1,0 +1,36 @@
+id: scroll
+version: 0.3.0
+kind: atomic
+description: Scroll at a specific screen location. Moves the mouse to (x, y) then
+  scrolls in the given direction. Use amount=15 for half a page, amount=30 for a full
+  page. Values below 5 are barely visible.
+side_effects:
+- screen_input
+preconditions:
+- backend.connected
+postconditions:
+- viewport shifted by the requested amount
+examples:
+- inputs:
+    x: 500
+    y: 400
+    direction: down
+    amount: 15
+  note: Scroll down half a page.
+- inputs:
+    x: 500
+    y: 400
+    direction: up
+    amount: 30
+  note: Scroll up one full page.
+- inputs:
+    x: 500
+    y: 400
+    direction: down
+    amount: 60
+  note: Scroll down two full pages.
+tags:
+- mouse
+- input
+- scroll
+- core

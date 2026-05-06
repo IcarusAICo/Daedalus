@@ -1,0 +1,25 @@
+# Core skills are built-in capabilities that ship with Daedalus.
+# They are NOT eligible for archival, deletion, or amendment by the learner.
+#
+# Only add skills here that are fundamental OS interaction primitives or
+# essential observation tools. Learned/synthesized skills should NOT be
+# listed here.
+
+core_skills:
+  - assert_screen_contains
+  - click_all
+  - click_element
+  - locate_element
+  - locate_elements
+  - monitor_text_region
+  - mouse
+  - populate_store_from_analysis
+  - scroll
+  - store_query
+  - tick_counter
+  - type_shortcut
+  - type_text
+  - type_text_secret
+  - view_screen
+  - vision_query
+  - wait

@@ -1,0 +1,50 @@
+id: type_shortcut
+version: 0.2.0
+kind: atomic
+description: Press one or more keyboard shortcuts. Accepts a single shortcut (list
+  of keys) or multiple shortcuts (list of lists).
+side_effects:
+- screen_input
+preconditions:
+- backend.connected
+- len(keys) >= 1
+examples:
+- inputs:
+    keys:
+    - ctrl
+    - c
+  expected:
+    count: 1
+    shortcuts_pressed:
+    - - ctrl
+      - c
+- inputs:
+    keys:
+    - - ctrl
+      - a
+    - - ctrl
+      - c
+  expected:
+    count: 2
+    shortcuts_pressed:
+    - - ctrl
+      - a
+    - - ctrl
+      - c
+- inputs:
+    keys:
+    - - Left
+    - - Left
+    - - Left
+  expected:
+    count: 3
+    shortcuts_pressed:
+    - - Left
+    - - Left
+    - - Left
+tests:
+- basic.json
+tags:
+- keyboard
+- shortcut
+- core

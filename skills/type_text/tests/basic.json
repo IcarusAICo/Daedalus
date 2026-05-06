@@ -1,0 +1,8 @@
+{
+  "name": "basic_write",
+  "inputs": {"text": "hello"},
+  "expected_output": {"chars_typed": 5},
+  "expected_events": [
+    {"op": "write", "args": {"text": "hello"}}
+  ]
+}
