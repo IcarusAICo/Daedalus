@@ -49,6 +49,7 @@ interface AgentActions {
   setConfig: (config: Partial<DaedalusConfig>) => void;
   toggleConfig: () => void;
   setContextUsage: (used: number, max: number) => void;
+  setRunMode: (mode: "learn" | "explore" | "plan") => void;
   reset: () => void;
 }
 
@@ -106,6 +107,7 @@ const INITIAL_STATE: AgentState = {
   error: null,
   showConfig: false,
   contextUsage: null,
+  runMode: null,
 };
 
 export const useAgentStore = create<AgentStore>((set) => ({
@@ -212,6 +214,8 @@ export const useAgentStore = create<AgentStore>((set) => ({
   toggleConfig: () => set((state) => ({ showConfig: !state.showConfig })),
 
   setContextUsage: (used, max) => set({ contextUsage: { used, max } }),
+
+  setRunMode: (mode) => set({ runMode: mode }),
 
   reset: () => set({ ...INITIAL_STATE }),
 }));

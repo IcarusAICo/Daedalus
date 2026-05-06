@@ -61,6 +61,7 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
         : configPath;
       pushGoal(g);
       goalHistory.current = [g, ...goalHistory.current.filter((h) => h !== g)].slice(0, 100);
+      useAgentStore.getState().setRunMode(runMode);
       manager.start(g, effectiveConfig, runMode);
       setInputMode("idle");
       setHistoryIdx(-1);

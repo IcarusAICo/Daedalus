@@ -311,6 +311,7 @@ function getFields(
     { label: "Record", path: "record", value: config.record, type: "boolean" },
     { label: "Record FPS", path: "recordFps", value: config.recordFps, type: "number" },
     { label: "No Strategy", path: "noStrategy", value: config.noStrategy, type: "boolean" },
+    { label: "Yolo (auto-approve)", path: "yolo", value: config.yolo, type: "boolean" },
     { label: "Verbose", path: "verbose", value: config.verbose, type: "boolean" },
     { label: "", path: "_sep5", value: "", type: "string" },
     { label: "Skills Dir", path: "skillsDir", value: config.skillsDir, type: "string" },

@@ -156,9 +156,10 @@ class LLMGateway:
         model = self._config.model_for(call.role)
         temperature = call.temperature if call.temperature is not None else self._config.temperature_for(call.role)
         timeout_s = self._config.request_timeout_s
+        messages = _sanitize_message_sequence(call.messages)
         kwargs: dict[str, Any] = {
             "model": model,
-            "messages": call.messages,
+            "messages": messages,
             "temperature": temperature,
             "timeout": timeout_s,
             "num_retries": self._config.max_retries,
@@ -315,6 +316,57 @@ class LLMGateway:
 
     def set_tracer(self, tracer: TraceRecorder | None) -> None:
         self._tracer = tracer
+
+
+def _sanitize_message_sequence(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ensure message sequence is valid for Bedrock/Anthropic APIs.
+
+    Fixes:
+    - Orphaned 'tool' messages not preceded by an assistant with tool_calls
+    - Consecutive user/tool messages without an assistant message in between
+    """
+    if not messages:
+        return messages
+
+    result = []
+    for i, msg in enumerate(messages):
+        role = msg.get("role", "")
+        if role == "tool":
+            # Check if preceded by assistant with tool_calls
+            if result and result[-1].get("role") == "assistant":
+                tc = result[-1].get("tool_calls")
+                if tc:
+                    result.append(msg)
+                    continue
+            # Orphaned tool message — convert to user
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                content = "\n".join(text_parts) or "[tool result]"
+            result.append({
+                "role": "user",
+                "content": f"[Tool result]: {str(content)[:500]}",
+            })
+        else:
+            result.append(msg)
+
+    # Merge consecutive user messages
+    merged: list[dict[str, Any]] = []
+    for msg in result:
+        if merged and msg.get("role") == "user" and merged[-1].get("role") == "user":
+            prev_content = merged[-1].get("content", "")
+            curr_content = msg.get("content", "")
+            if isinstance(prev_content, str) and isinstance(curr_content, str):
+                merged[-1]["content"] = prev_content + "\n\n" + curr_content
+            else:
+                # Multimodal (list) content can't be trivially merged —
+                # insert a dummy assistant message to maintain role alternation.
+                merged.append({"role": "assistant", "content": "Continuing."})
+                merged.append(msg)
+        else:
+            merged.append(msg)
+
+    return merged
 
 
 def _inject_cache_control(messages: list[dict[str, Any]]) -> None:

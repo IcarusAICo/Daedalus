@@ -180,17 +180,15 @@ def summarize_and_compact(
     # insertion point and verify the message sequence is valid.
     insert_end = 3  # index after summary_msg (system, user, summary)
     while insert_end < len(messages) and messages[insert_end].get("role") == "tool":
-        # Orphaned tool message — convert to user message
+        # Orphaned tool message — fold content into the summary user message
         tool_msg = messages[insert_end]
         tool_content = tool_msg.get("content", "")
         if isinstance(tool_content, list):
             text_parts = [p.get("text", "") for p in tool_content if isinstance(p, dict) and p.get("type") == "text"]
             tool_content = "\n".join(text_parts) or "[tool result]"
-        messages[insert_end] = {
-            "role": "user",
-            "content": f"[Previous tool result]: {str(tool_content)[:500]}",
-        }
-        insert_end += 1
+        messages[2]["content"] += f"\n\n[Previous tool result]: {str(tool_content)[:500]}"
+        messages.pop(insert_end)
+        # don't increment insert_end since we removed the element
 
     new_estimated = estimate_token_count(messages)
     log.info("compaction complete: %d -> %d estimated tokens", estimated, new_estimated)

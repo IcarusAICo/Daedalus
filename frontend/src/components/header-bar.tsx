@@ -8,6 +8,7 @@ export function HeaderBar(): React.ReactElement {
   const configPath = useAgentStore((s) => s.configPath);
   const connected = useAgentStore((s) => s.connected);
   const startedAt = useAgentStore((s) => s.startedAt);
+  const runMode = useAgentStore((s) => s.runMode);
   const elapsed = useElapsedTime(startedAt);
 
   const connectionStr =
@@ -16,6 +17,7 @@ export function HeaderBar(): React.ReactElement {
       : "mock://local";
 
   const statusColor = connected ? "green" : "gray";
+  const modeColor = runMode === "explore" ? "magenta" : runMode === "plan" ? "blue" : "green";
 
   return (
     <Box
@@ -27,7 +29,7 @@ export function HeaderBar(): React.ReactElement {
     >
       <Box gap={2}>
         <Text bold color="cyan">
-          DAEDALUS <Text dimColor>v0.0.1</Text>
+          DAEDALUS{runMode && <Text color={modeColor}>{` [${runMode}]`}</Text>} <Text dimColor>v0.0.1</Text>
         </Text>
         {configPath && (
           <Text dimColor>[{configPath}]</Text>

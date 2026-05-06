@@ -655,6 +655,11 @@ class Learner:
         skill_amendments: list[SkillAmendment],
     ) -> LearnerFeedback:
         """Send a final message asking the learner to summarize findings."""
+        if messages and messages[-1].get("role") in ("tool",):
+            messages.append({
+                "role": "assistant",
+                "content": "I've completed my analysis. Let me summarize my findings.",
+            })
         messages.append({
             "role": "user",
             "content": (
