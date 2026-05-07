@@ -132,6 +132,7 @@ export interface DaedalusConfig {
   noOverlay: boolean;
   noStrategy: boolean;
   yolo: boolean;
+  reuseExploration: string | null;
 }
 
 export type ChatMessageKind = "thinking" | "tool_call" | "phase" | "error" | "status" | "learner_feedback";
@@ -207,4 +208,5 @@ export const DEFAULT_CONFIG: DaedalusConfig = {
   noOverlay: true,
   noStrategy: false,
   yolo: false,
+  reuseExploration: null,
 };

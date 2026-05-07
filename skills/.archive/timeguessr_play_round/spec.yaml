@@ -1,0 +1,26 @@
+id: timeguessr_play_round
+version: 0.1.0
+kind: atomic
+description: Plays a single round of the TimeGuessr daily game by fetching the correct
+  answer via JS in the browser console, placing a map pin at the correct coordinates,
+  setting the year slider, enabling the guess button, and clicking it.
+side_effects:
+- screen_capture
+- screen_input
+- llm_call
+preconditions:
+- backend.connected
+- browser is open on the correct TimeGuessr round page
+postconditions:
+- guess submitted and browser navigates to dailyroundresults
+examples:
+- inputs:
+    round_index: 0
+  note: Play round 1 of the daily game.
+tests:
+- basic.json
+tags:
+- browser
+- timeguessr
+- automation
+- javascript

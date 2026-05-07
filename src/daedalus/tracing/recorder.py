@@ -62,7 +62,14 @@ CREATE INDEX IF NOT EXISTS idx_traces_status  ON traces(status);
 
 
 class TraceRecorder:
-    """Owns a single task's trace dir; thread-safe for concurrent skills."""
+    """Owns a single task's trace dir; thread-safe for concurrent skills.
+
+    When constructed with ``no_persist=True`` all writes (disk, SQLite,
+    screenshots) are silently skipped.  The recorder is still fully usable
+    — ``task_id``, ``emit``, lifecycle methods, etc. all work, they just
+    produce no side-effects.  This is used by test mode so test runs do not
+    accumulate trace directories or DB rows.
+    """
 
     def __init__(
         self,
@@ -72,6 +79,7 @@ class TraceRecorder:
         program_ref: str | None = None,
         task_id: str | None = None,
         max_events_bytes: int = 50 * 1024 * 1024,
+        no_persist: bool = False,
     ) -> None:
         self.task_id = task_id or _new_task_id()
         self.task_name = task_name
@@ -89,19 +97,21 @@ class TraceRecorder:
         self._max_events_bytes = max_events_bytes
         self._started: str = _now_iso()
         self._finished: str | None = None
+        self._no_persist = no_persist
 
-        self._task_dir.mkdir(parents=True, exist_ok=True)
-        self._screens_dir.mkdir(parents=True, exist_ok=True)
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.executescript(_TRACES_SCHEMA)
-            conn.execute(
-                "INSERT OR REPLACE INTO traces(task_id,name,status,started,program,num_events) "
-                "VALUES(?,?,?,?,?,0)",
-                (self.task_id, self.task_name, self._status, self._started, program_ref),
-            )
-            conn.commit()
-        self._write_meta()
+        if not no_persist:
+            self._task_dir.mkdir(parents=True, exist_ok=True)
+            self._screens_dir.mkdir(parents=True, exist_ok=True)
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._connect() as conn:
+                conn.executescript(_TRACES_SCHEMA)
+                conn.execute(
+                    "INSERT OR REPLACE INTO traces(task_id,name,status,started,program,num_events) "
+                    "VALUES(?,?,?,?,?,0)",
+                    (self.task_id, self.task_name, self._status, self._started, program_ref),
+                )
+                conn.commit()
+            self._write_meta()
 
     # -- DB helpers ----------------------------------------------------------------
 
@@ -111,6 +121,8 @@ class TraceRecorder:
         return conn
 
     def _write_meta(self) -> None:
+        if self._no_persist:
+            return
         meta = {
             "task_id": self.task_id,
             "task_name": self.task_name,
@@ -128,13 +140,16 @@ class TraceRecorder:
     def start(self) -> None:
         with self._lock:
             self._status = "running"
-            self._sync_db_status()
-            self._write_meta()
+            if not self._no_persist:
+                self._sync_db_status()
+                self._write_meta()
 
     def finish(self, status: Literal["success", "failed", "aborted"], notes: str | None = None) -> None:
         with self._lock:
             self._status = status
             self._finished = _now_iso()
+            if self._no_persist:
+                return
             with self._connect() as conn:
                 conn.execute(
                     "UPDATE traces SET status=?, finished=?, num_events=?, notes=? WHERE task_id=?",
@@ -144,6 +159,8 @@ class TraceRecorder:
             self._write_meta()
 
     def _sync_db_status(self) -> None:
+        if self._no_persist:
+            return
         with self._connect() as conn:
             conn.execute(
                 "UPDATE traces SET status=?, num_events=? WHERE task_id=?",
@@ -174,14 +191,18 @@ class TraceRecorder:
     ) -> None:
         evt = TraceEvent(kind=kind, level=level, data=data or {})
         with self._lock:
-            self._rotate_events_if_needed()
             self._events_count += 1
+            if self._no_persist:
+                return
+            self._rotate_events_if_needed()
             with self._events_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(asdict(evt), default=str) + "\n")
 
     def attach_screenshot(self, png_bytes: bytes, *, width: int, height: int) -> Path:
         with self._lock:
             self._screen_count += 1
+            if self._no_persist:
+                return self._screens_dir / f"{self._screen_count:04d}.png"
             name = f"{self._screen_count:04d}.png"
             path = self._screens_dir / name
             path.write_bytes(png_bytes)

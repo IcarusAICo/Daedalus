@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef } from "react";
 import { resolve } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
 import { Box, Text, useInput } from "ink";
+import { useViewport } from "./utils/term.js";
 import Spinner from "ink-spinner";
 import { parse as parseYaml } from "yaml";
 import { useAgentStore } from "./store/agent-store.js";
@@ -15,6 +16,7 @@ import { ChatFeed } from "./components/chat-feed.js";
 import { ConfirmDialog } from "./components/confirm-dialog.js";
 import { ConfigScreen } from "./components/config-screen.js";
 import { TraceBrowser } from "./components/trace-browser.js";
+import { RunFinished } from "./components/run-finished.js";
 import { useKeybindings } from "./hooks/use-keybindings.js";
 
 const LOGO = `     ___                  __      __
@@ -33,6 +35,9 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
   const [manager] = useState(() => new ProcessManager(projectRoot));
   const persistedState = useRef(loadState());
   const goalHistory = useRef(persistedState.current.goalHistory);
+  const { rows: termHeight, cols: termWidth } = useViewport();
+  // HeaderBar (3 rows) + StatusBar (3 rows) framing every screen.
+  const innerRows = Math.max(1, termHeight - 6);
 
   const storeGoal = useAgentStore((s) => s.goal);
   const pendingConfirm = useAgentStore((s) => s.pendingConfirm);
@@ -47,11 +52,21 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
   const [historyIdx, setHistoryIdx] = useState(-1);
   const [showTraces, setShowTraces] = useState(false);
   const [isReplay, setIsReplay] = useState(false);
+  const [runFinished, setRunFinished] = useState(false);
 
   // Input is "active" when user is typing (goal prompt, test skill commands, or confirm comment)
   const inputActive = (inputMode === "goal" && !storeGoal) || inputMode === "test";
 
   useKeybindings(manager, inputActive);
+
+  // Detect when a run finishes (backend disconnects after a goal was active)
+  const prevConnectedRef = useRef(connected);
+  React.useEffect(() => {
+    if (prevConnectedRef.current && !connected && storeGoal && inputMode === "idle" && !runFinished) {
+      setRunFinished(true);
+    }
+    prevConnectedRef.current = connected;
+  }, [connected, storeGoal, inputMode, runFinished]);
 
   const startRun = useCallback(
     (g: string, runMode: "learn" | "explore" | "plan" | "test" = "learn") => {
@@ -174,6 +189,16 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
   }, [goal, connected, storeGoal, startRun, configPath, projectRoot, tracePath]);
 
   useInput((input, key) => {
+    // Handle input on the run-finished screen
+    if (runFinished) {
+      if (key.return) {
+        handleReturnToStart();
+      } else if (key.escape) {
+        process.exit(0);
+      }
+      return;
+    }
+
     if (inputActive && !showConfig && !pendingConfirm) {
       if (key.return && goalInput.trim()) {
         const trimmed = goalInput.trim();
@@ -298,16 +323,28 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
     [projectRoot]
   );
 
+  const handleReturnToStart = useCallback(() => {
+    useAgentStore.getState().reset();
+    setInputMode("goal");
+    setRunFinished(false);
+    setIsReplay(false);
+    setGoalInput("");
+    setCursorPos(0);
+    setHistoryIdx(-1);
+  }, []);
+
   if (showTraces) {
     const tracesDir = resolve(projectRoot, useAgentStore.getState().config.tracesDir || "./traces");
     return (
-      <Box flexDirection="column" width="100%" height="100%">
+      <Box flexDirection="column" width={termWidth} height={termHeight}>
         <HeaderBar />
-        <Box flexDirection="column" flexGrow={1} overflow="hidden" paddingX={1}>
+        <Box flexDirection="column" height={innerRows} flexShrink={0} overflow="hidden">
           <TraceBrowser
             tracesDir={tracesDir}
             onSelect={handleTraceSelect}
             onExit={() => setShowTraces(false)}
+            viewportRows={innerRows}
+            viewportCols={termWidth}
           />
         </Box>
         <StatusBar isReplay={isReplay} />
@@ -317,10 +354,26 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
 
   if (showConfig) {
     return (
-      <Box flexDirection="column" width="100%" height="100%">
+      <Box flexDirection="column" width={termWidth} height={termHeight}>
         <HeaderBar />
-        <Box flexDirection="column" flexGrow={1} overflow="hidden">
-          <ConfigScreen projectRoot={projectRoot} />
+        <Box flexDirection="column" height={innerRows} flexShrink={0} overflow="hidden">
+          <ConfigScreen
+            projectRoot={projectRoot}
+            viewportRows={innerRows}
+            viewportCols={termWidth}
+          />
+        </Box>
+        <StatusBar isReplay={isReplay} />
+      </Box>
+    );
+  }
+
+  if (runFinished) {
+    return (
+      <Box flexDirection="column" width={termWidth} height={termHeight}>
+        <HeaderBar />
+        <Box flexDirection="column" height={innerRows} flexShrink={0} overflow="hidden">
+          <RunFinished onReturn={handleReturnToStart} />
         </Box>
         <StatusBar isReplay={isReplay} />
       </Box>
@@ -328,10 +381,10 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
   }
 
   return (
-    <Box flexDirection="column" width="100%" height="100%">
+    <Box flexDirection="column" width={termWidth} height={termHeight}>
       <HeaderBar />
 
-      <Box flexDirection="column" flexGrow={1} overflow="hidden" paddingX={1}>
+      <Box flexDirection="column" height={innerRows} flexShrink={0} overflow="hidden" paddingX={1}>
         {/* Show logo + goal prompt when idle */}
         {inputActive && inputMode === "goal" && (
           <Box flexDirection="column" marginTop={1}>
@@ -349,6 +402,24 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
                 <Text>{goalInput.slice(cursorPos)}</Text>
               </Text>
             </Box>
+            {historyIdx >= 0 && goalHistory.current.length > 0 && (
+              <Box flexDirection="column" marginTop={1} paddingLeft={2}>
+                <Text dimColor bold>History [{historyIdx + 1}/{goalHistory.current.length}]:</Text>
+                {goalHistory.current
+                  .slice(Math.max(0, historyIdx - 2), historyIdx + 4)
+                  .map((item, i) => {
+                    const actualIdx = Math.max(0, historyIdx - 2) + i;
+                    const isCurrent = actualIdx === historyIdx;
+                    return (
+                      <Box key={`hist-${actualIdx}`} paddingLeft={1}>
+                        <Text color={isCurrent ? "cyan" : undefined} dimColor={!isCurrent}>
+                          {isCurrent ? "▸ " : "  "}{item.length > 60 ? item.slice(0, 57) + "..." : item}
+                        </Text>
+                      </Box>
+                    );
+                  })}
+              </Box>
+            )}
             <Box marginTop={1}>
               <Text dimColor>
                 /learn &lt;goal&gt;  /explore &lt;goal&gt;  /plan &lt;goal&gt;  /test  •  /config  /traces  /help  /quit  •  ↑↓: history

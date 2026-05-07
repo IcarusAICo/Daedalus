@@ -63,7 +63,9 @@ export function setLastConfig(configPath: string | null): void {
 
 export function persistConfig(config: DaedalusConfig, cfgPath: string | null): void {
   const state = loadState();
-  state.config = config;
+  // Exclude reuseExploration from persistence — it's a per-run setting
+  const { reuseExploration: _, ...persistable } = config;
+  state.config = { ...persistable, reuseExploration: null } as DaedalusConfig;
   state.lastConfigPath = cfgPath;
   saveState(state);
 }

@@ -35,6 +35,7 @@ export function StatusBar({ isReplay }: StatusBarProps): React.ReactElement {
   const phases = useAgentStore((s) => s.phases);
   const attempt = useAgentStore((s) => s.attempt);
   const error = useAgentStore((s) => s.error);
+  const verdict = useAgentStore((s) => s.verdict);
   const contextUsage = useAgentStore((s) => s.contextUsage);
 
   const phase = phases[currentPhase];
@@ -44,6 +45,8 @@ export function StatusBar({ isReplay }: StatusBarProps): React.ReactElement {
 
   const attemptStr = attempt > 0 ? `  Attempt ${attempt + 1}` : "";
 
+  const showVerdictInstead = verdict && error;
+
   return (
     <Box
       borderStyle="single"
@@ -51,9 +54,15 @@ export function StatusBar({ isReplay }: StatusBarProps): React.ReactElement {
       paddingX={1}
       justifyContent="space-between"
       width="100%"
+      height={3}
+      flexShrink={0}
     >
       <Box>
-        {error ? (
+        {showVerdictInstead ? (
+          <Text color={verdict.achieved ? "green" : "red"} bold>
+            {verdict.achieved ? "✓" : "✗"} {verdict.summary || (verdict.achieved ? "Goal achieved" : "Goal not achieved")}
+          </Text>
+        ) : error ? (
           <Text color="red" bold>
             Error: {error}
           </Text>

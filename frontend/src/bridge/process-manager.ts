@@ -124,6 +124,7 @@ export class ProcessManager {
     if (store.config.record) args.push("--record");
     if (store.config.verbose) args.push("--verbose");
     if (store.config.yolo) args.push("--yes");
+    if (store.config.reuseExploration) args.push("--reuse-exploration", store.config.reuseExploration);
 
     this.bridge = new JsonRpcBridge("daedalus", args, this.projectRoot);
 

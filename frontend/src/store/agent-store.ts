@@ -83,6 +83,7 @@ const defaultConfig: DaedalusConfig = {
   noOverlay: true,
   noStrategy: false,
   yolo: false,
+  reuseExploration: null,
 };
 
 const INITIAL_STATE: AgentState = {

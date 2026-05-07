@@ -446,6 +446,47 @@ class SyntheticSkillImplementor:
         load_skill(target, registry=registry if registry is not None else get_registry())
         return bundle.skill_id
 
+    def revise(self, skill_id: str, feedback: str) -> ImplementorResult:
+        """Re-synthesize an existing temp skill given feedback about what is wrong.
+
+        Reads the current ``skills/_temp/<skill_id>/skill.py`` and
+        ``spec.yaml``, embeds them in the prompt as context, and asks the
+        implementor to produce a corrected version.  The revised bundle is
+        written back to the same temp path, replacing the old files.
+
+        Returns an ``ImplementorResult`` — check ``.ok`` before publishing.
+        """
+        temp_path = self._skills_dir / "_temp" / skill_id
+        if not temp_path.exists():
+            return ImplementorResult(
+                bundle=None,
+                notes=f"no temp skill {skill_id!r} found; implement it first",
+            )
+
+        current_skill_py = (temp_path / "skill.py").read_text()
+        current_spec_yaml = (temp_path / "spec.yaml").read_text()
+
+        extra_context = (
+            "REVISION REQUEST\n"
+            "----------------\n"
+            f"The skill '{skill_id}' already exists. Below is its current "
+            "implementation. Your job is to fix it according to the feedback.\n\n"
+            f"FEEDBACK FROM TESTER:\n{feedback}\n\n"
+            f"CURRENT spec.yaml:\n```yaml\n{current_spec_yaml}\n```\n\n"
+            f"CURRENT skill.py:\n```python\n{current_skill_py}\n```\n\n"
+            "Produce a corrected JSON object with the same skill_id. "
+            "Keep all parts that are not related to the feedback unchanged."
+        )
+
+        request = ImplementorRequest(
+            proposed_id=skill_id,
+            description=f"Revised version of '{skill_id}' — see feedback in extra_context.",
+            rationale="Revision requested by explorer after live testing",
+            side_effects=["screen_capture", "screen_input", "llm_call"],
+            extra_context=extra_context,
+        )
+        return self.synthesize(request)
+
     def publish_temp(self, bundle: SkillBundle, *, registry: Registry | None = None) -> Path:
         """Publish a bundle into ``skills_dir/_temp/<id>/`` and load it into
         the registry. Returns the path to the temp skill directory.

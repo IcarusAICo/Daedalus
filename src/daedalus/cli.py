@@ -492,12 +492,13 @@ def _run_test_mode(
         be = make_backend("mock")
     be.connect()
 
-    # Set up an execution context
+    # Set up an execution context — no_persist so test runs leave no trace files
     tracer = TraceRecorder(
         traces_root=run_dir,
         db_path=db_path,
         task_name="test-session",
         task_id="test",
+        no_persist=True,
     )
     tracer.start()
     task_state = TaskState(db_path, tracer.task_id)
@@ -648,6 +649,7 @@ def cmd_run(
     learn_on_succeed: bool = typer.Option(False, "--learn-on-succeed", help="Run learner analysis even on success."),
     record: bool = typer.Option(False, "--record", help="Record the screen via ffmpeg during execution (saves to trace dir)."),
     record_fps: int = typer.Option(30, "--record-fps", help="Frames per second for screen recording (default 30)."),
+    reuse_exploration: Optional[str] = typer.Option(None, "--reuse-exploration", help="Trace directory name to reuse exploration from (skips explorer, proceeds to planning)."),
     frontend_mode: bool = typer.Option(False, "--frontend-mode", help="Emit JSON-RPC events to stdout for the TypeScript UI."),
 ) -> None:
     """Run a hand-written or planner-emitted program."""
@@ -806,7 +808,7 @@ def cmd_run(
 
         # Step 0: Strategy phase — subtask decomposition only (no skill synthesis).
         # Skipped when explorer is active since exploration provides richer context.
-        if mode in ("learn", "explore"):
+        if mode in ("learn", "explore") or reuse_exploration:
             console.print("[dim]strategy phase skipped (explorer is active)[/dim]")
             if bridge:
                 bridge.emit_phase("strategy", "skipped")
@@ -837,7 +839,30 @@ def cmd_run(
                     bridge.emit_phase("strategy", "failed", str(exc))
 
         # Step 0.5: Exploration phase — freeform environment discovery.
-        if mode == "plan":
+        if reuse_exploration:
+            # Reuse exploration from a previous trace
+            _reuse_dir = tr_dir / reuse_exploration / "explorer"
+            _reuse_obs_path = _reuse_dir / "observations.md"
+            if _reuse_obs_path.exists():
+                _reuse_obs = _reuse_obs_path.read_text()
+                console.print(f"[green]reusing exploration from {reuse_exploration}[/green]")
+                obs_section = "\n\n## Explorer Observations\n" + _reuse_obs
+                memory_context = (memory_context or "") + obs_section
+
+                # Copy reused observations into current run's explorer dir
+                _cur_explorer_dir = run_dir / "explorer"
+                _cur_explorer_dir.mkdir(parents=True, exist_ok=True)
+                (_cur_explorer_dir / "observations.md").write_text(_reuse_obs)
+                (_cur_explorer_dir / "reused_from.txt").write_text(reuse_exploration)
+
+                if bridge:
+                    bridge.emit_phase("explorer", "complete", f"reused from {reuse_exploration}")
+            else:
+                console.print(f"[red]no explorer observations found in {reuse_exploration}[/red]")
+                if bridge:
+                    bridge.emit_phase("explorer", "failed", f"no observations in {reuse_exploration}")
+                raise typer.Exit(2)
+        elif mode == "plan":
             console.print("[dim]exploration phase skipped (plan mode)[/dim]")
             if bridge:
                 bridge.emit_phase("explorer", "skipped")
@@ -975,7 +1000,8 @@ def cmd_run(
                     bridge.emit_phase("explorer", "failed", str(exc))
 
         # In "explore" mode the explorer is the sole actor — skip planning/execution.
-        if mode == "explore":
+        # Exception: when reusing exploration, always proceed to planning.
+        if mode == "explore" and not reuse_exploration:
             console.print("[green]explore mode complete — task handled by explorer.[/green]")
             _update_run_meta(run_dir, status="success", finished=datetime.now(timezone.utc).isoformat())
             if bridge:

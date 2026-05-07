@@ -115,7 +115,9 @@ _TOOL_EXPLORE_DONE = {
         "description": (
             "Signal that exploration is complete. Provide your observations about "
             "the environment, problem structure, rules, layout, and any other "
-            "information the planner will need to produce a good plan."
+            "information the planner will need to produce a good plan. "
+            "Also list any new skills you registered during this session so the "
+            "planner knows they are available."
         ),
         "parameters": {
             "type": "object",
@@ -125,7 +127,10 @@ _TOOL_EXPLORE_DONE = {
                     "description": (
                         "Structured observations from exploration. Include: "
                         "environment state, rules discovered, problem constraints, "
-                        "layout information, and recommended approach."
+                        "layout information, recommended approach, and a 'New skills "
+                        "registered' section listing any skills you created and "
+                        "registered during this session (with a one-line description "
+                        "of each so the planner can use them)."
                     ),
                 },
             },
@@ -153,6 +158,40 @@ _TOOL_REGISTER_SKILL = {
                 },
             },
             "required": ["skill_name"],
+        },
+    },
+}
+
+_TOOL_REVISE_SKILL = {
+    "type": "function",
+    "function": {
+        "name": "revise_skill",
+        "description": (
+            "Revise an existing temp skill that was implemented earlier in this "
+            "session. Use this when you tested a skill and found a bug or "
+            "limitation — describe what is wrong and what the fix should be. "
+            "The implementor will re-synthesize the skill incorporating your "
+            "feedback and the current source code. The revised skill replaces "
+            "the original in the registry. Only skills created via "
+            "implement_skill in this session can be revised."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "description": "The skill_id to revise (must be a temp skill from this session).",
+                },
+                "feedback": {
+                    "type": "string",
+                    "description": (
+                        "What is wrong with the current implementation and what "
+                        "should change. Be specific — include the observed failure, "
+                        "the root cause if known, and the desired behaviour."
+                    ),
+                },
+            },
+            "required": ["skill_name", "feedback"],
         },
     },
 }
@@ -211,6 +250,30 @@ WHAT TO DISCOVER:
 - Any relevant rules or constraints for interaction
 - Current state summary (what's on screen, what stage we're at)
 
+SKILL BUILDING (IMPORTANT):
+As you explore, actively look for reusable patterns and build skills for them.
+This saves future tasks from repeating the same discovery work.
+
+The paradigm:
+1. DISCOVER: Find the correct sequence of actions to accomplish something
+   (e.g. you figure out how to open an incognito Firefox window)
+2. IMPLEMENT: Call implement_skill to encode that sequence as a reusable skill
+   (e.g. implement_skill(skill_name="open_firefox_incognito", description="..."))
+3. TEST: Call the new skill once to verify it works correctly in the live environment
+4. REGISTER: If it worked, call register_skill to promote it to the permanent library
+
+Good candidates for new skills:
+- Any multi-step UI sequence you had to figure out (open app, navigate to a view,
+  toggle a setting, open a browser in a specific mode)
+- Fetching data from an API or service the task relies on
+- Interacting with a custom UI widget (slider, map pin, date picker)
+- Any pattern you used more than once during exploration
+
+Do NOT create trivial single-action skills (e.g. a skill that just calls click_element).
+A good skill composes 2+ steps into a reliable, parameterized unit.
+
+When you call explore_done, list the skills you registered so the planner can use them.
+
 GUIDELINES:
 - Be ACTION-ORIENTED: test tools and discover interactions, don't just look
 - Be EFFICIENT: read something once with vision_query, trust the result, move on
@@ -253,7 +316,8 @@ and dynamic content make them unreliable. Instead, report:
 Call explore_done when you understand the interaction mechanics well enough \
 for the planner to write a working plan. Make sure to provide the planner with \
 robust instructions for how to solve the problem that would work even if \
-the environment or UI positions change.
+the environment or UI positions change. Include a list of any new skills you \
+registered so the planner knows they are available.
 """
 
 
@@ -270,6 +334,28 @@ STRATEGY:
 2. Interact with the environment: click buttons, type text, use hotkeys, navigate.
 3. If you need a specialized capability that doesn't exist, use implement_skill to create it.
 4. When you have completed the task, call explore_done with a summary of what you did.
+
+SKILL BUILDING (IMPORTANT):
+As you work, actively capture reusable patterns as skills so future tasks benefit.
+
+The paradigm:
+1. DISCOVER: Figure out the correct sequence of actions for a sub-task
+   (e.g. you work out how to open an app, fetch an API, or interact with a widget)
+2. IMPLEMENT: Call implement_skill to encode that sequence as a reusable skill
+   (e.g. implement_skill(skill_name="open_firefox_incognito", description="..."))
+3. TEST: Call the new skill once to verify it works correctly in the live environment
+4. REGISTER: If it worked, call register_skill to promote it to the permanent library
+5. CONTINUE: Use the newly registered skill for the rest of this task
+
+Good candidates for new skills:
+- Any multi-step UI sequence you had to figure out (open app, navigate to a view,
+  toggle a setting, open a browser in a specific mode)
+- Fetching data from an API or service the task relies on
+- Interacting with a custom UI widget (slider, map pin, date picker)
+- Any pattern you used more than once
+
+Do NOT create trivial single-action skills (e.g. a skill that just calls click_element).
+A good skill composes 2+ steps into a reliable, parameterized unit.
 
 GUIDELINES:
 - Be ACTION-ORIENTED: take concrete steps to accomplish the goal
@@ -306,7 +392,7 @@ and dynamic content make them unreliable. Instead, use:
 - Relative spatial relationships ("the button is below the header")
 
 Call explore_done when the task is complete. Provide a summary of what you \
-accomplished and any relevant observations.
+accomplished, any relevant observations, and the list of new skills you registered.
 """
 
 
@@ -351,6 +437,7 @@ class Explorer:
             tools.append(_skill_to_tool_def(entry))
         tools.append(_TOOL_IMPLEMENT_SKILL)
         tools.append(_TOOL_REGISTER_SKILL)
+        tools.append(_TOOL_REVISE_SKILL)
         tools.append(_TOOL_EXPLORE_DONE)
         return tools
 
@@ -656,6 +743,9 @@ class Explorer:
             elif tc.name == "register_skill":
                 result = self._handle_register_skill(tc.arguments)
                 return result, False
+            elif tc.name == "revise_skill":
+                result = self._handle_revise_skill(tc.arguments)
+                return result, False
             else:
                 # All other tool names are skill IDs.
                 return self._handle_skill_call(tc.name, tc.arguments, ctx), False
@@ -804,3 +894,45 @@ class Explorer:
             })
         except Exception as exc:
             return json.dumps({"status": "failed", "error": str(exc)})
+
+    def _handle_revise_skill(self, args: dict[str, Any]) -> str:
+        skill_name = args.get("skill_name", "")
+        feedback = args.get("feedback", "")
+
+        if not skill_name or not feedback:
+            return json.dumps({"error": "skill_name and feedback are both required"})
+
+        if skill_name not in self._temp_skills:
+            return json.dumps({
+                "error": f"{skill_name!r} is not a temp skill from this session. "
+                f"Only skills implemented in this session can be revised. "
+                f"Available temp skills: {self._temp_skills}"
+            })
+
+        try:
+            result = self._implementor.revise(skill_name, feedback)
+        except Exception as exc:
+            return json.dumps({"status": "failed", "error": f"Implementor error: {exc}"})
+
+        if result.ok and result.bundle is not None:
+            try:
+                # Replace the old temp skill with the revised one.
+                self._implementor.publish_temp(result.bundle)
+                self._librarian.reindex()
+                entry = self._registry.get(skill_name)
+                return json.dumps({
+                    "status": "revised",
+                    "skill_id": skill_name,
+                    "inputs": entry.cls.Inputs.model_json_schema(),
+                    "outputs": entry.cls.Outputs.model_json_schema(),
+                    "note": "Skill has been revised and reloaded. Test it again before registering.",
+                })
+            except Exception as exc:
+                return json.dumps({"status": "failed", "error": f"Publish error: {exc}"})
+        else:
+            errors = result.test_failures + [str(v) for v in result.violations]
+            return json.dumps({
+                "status": "failed",
+                "errors": errors,
+                "notes": result.notes,
+            })

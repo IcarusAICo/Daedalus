@@ -1,138 +1,155 @@
-import React, { useState, useEffect, useRef } from "react";
-import { Box, Text, useInput, useStdout } from "ink";
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
+import { existsSync } from "node:fs";
 import type { ChatMessage } from "../store/types.js";
 import { useAgentStore } from "../store/agent-store.js";
-import { existsSync } from "node:fs";
+import { ScrollList, type ScrollListItem, deriveFirstVisible, clampFirstVisible } from "./scroll-list.js";
+import { useMeasuredBox, padEnd, visualWidth, wrapLines } from "../utils/term.js";
+
+const MAX_THINKING_LINES = 6;
+const MAX_STATUS_LINES = 3;
+const MAX_RESULT_LINES = 8;
+const MAX_ARG_LINES = 4;
+const MAX_FEEDBACK_LINES = 14;
+const IMAGE_HEIGHT = 22;
 
 export function ChatFeed(): React.ReactElement {
   const chatMessages = useAgentStore((s) => s.chatMessages);
   const pendingConfirm = useAgentStore((s) => s.pendingConfirm);
-  const { stdout } = useStdout();
-  const terminalHeight = stdout?.rows ?? 40;
-  const viewportHeight = Math.max(5, terminalHeight - 8);
-  const maxVisible = viewportHeight * 3;
+  const currentPhase = useAgentStore((s) => s.currentPhase);
+  const phaseStatus = useAgentStore((s) => s.phases[s.currentPhase]?.status);
+
+  // Measure available space within the parent layout (ChatFeed sits next to
+  // a variable-height GoalDisplay / spinner row that appears during the
+  // planner/evaluator phases).
+  const { ref, size } = useMeasuredBox({ rows: 20, cols: 80 }, [
+    chatMessages.length,
+    !!pendingConfirm,
+    currentPhase,
+    phaseStatus,
+  ]);
 
   const [selectedIdx, setSelectedIdx] = useState(-1);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
-  const [scrollOffset, setScrollOffset] = useState(0);
+  const [firstVisible, setFirstVisible] = useState<number>(0);
   const [pinToBottom, setPinToBottom] = useState(true);
   const prevCountRef = useRef(chatMessages.length);
 
-  // Auto-scroll to bottom when new messages arrive (if pinned)
+  const cols = Math.max(20, size.cols);
+  const rows = Math.max(3, size.rows);
+
+  const items: ScrollListItem[] = useMemo(
+    () => chatMessages.map((msg, i) => buildItem(msg, i, cols, expandedIds, selectedIdx)),
+    [chatMessages, cols, expandedIds, selectedIdx]
+  );
+  // Heights for scroll math. Zero means the row is skipped entirely (e.g.
+  // empty thinking text or pending phase rows).
+  const heights = useMemo(
+    () => items.map((it) => {
+      const h = it.height ?? 1;
+      return h === 0 ? 0 : Math.max(1, h);
+    }),
+    [items]
+  );
+
+  // Reserve 2 rows in ScrollList for top/bottom indicators.
+  const contentRows = Math.max(0, rows - 2);
+
+  // When new messages arrive and we're pinned to bottom, jump first-visible
+  // to the end so the latest message stays in view.
   useEffect(() => {
     if (chatMessages.length > prevCountRef.current && pinToBottom) {
-      setScrollOffset(0);
+      const lastIdx = chatMessages.length - 1;
+      const fv = deriveFirstVisible(heights, lastIdx, contentRows);
+      setFirstVisible(fv);
     }
     prevCountRef.current = chatMessages.length;
-  }, [chatMessages.length, pinToBottom]);
+  }, [chatMessages.length, pinToBottom, heights, contentRows]);
+
+  // Re-clamp on viewport resize so rows aren't left dangling.
+  useEffect(() => {
+    setFirstVisible((fv) => clampFirstVisible(fv, heights, contentRows));
+  }, [heights, contentRows]);
 
   useInput((input, key) => {
     if (pendingConfirm) return;
 
-    // Page-Up: scroll back through history
+    const expandableIndices = chatMessages
+      .map((m, i) => (m.kind === "tool_call" ? i : -1))
+      .filter((i) => i >= 0);
+
     if (key.pageUp || (key.upArrow && key.shift)) {
-      const maxOffset = Math.max(0, chatMessages.length - maxVisible);
-      setScrollOffset((prev) => {
-        const next = Math.min(prev + viewportHeight, maxOffset);
-        if (next > 0) setPinToBottom(false);
-        return next;
-      });
-      return;
-    }
-
-    // Page-Down: scroll forward toward latest
-    if (key.pageDown || (key.downArrow && key.shift)) {
-      setScrollOffset((prev) => {
-        const next = Math.max(0, prev - viewportHeight);
-        if (next === 0) setPinToBottom(true);
-        return next;
-      });
-      return;
-    }
-
-    // 'g' or Home: jump to beginning
-    if (input === "g" && !key.shift) {
-      const maxOffset = Math.max(0, chatMessages.length - maxVisible);
-      setScrollOffset(maxOffset);
+      setFirstVisible((fv) => Math.max(0, fv - contentRows));
       setPinToBottom(false);
       return;
     }
-
-    // 'G' or End: jump to end
+    if (key.pageDown || (key.downArrow && key.shift)) {
+      const maxFv = computeMaxFirstVisible(heights, contentRows);
+      setFirstVisible((fv) => {
+        const next = Math.min(maxFv, fv + contentRows);
+        if (next >= maxFv) setPinToBottom(true);
+        return next;
+      });
+      return;
+    }
+    if (input === "g" && !key.shift) {
+      setFirstVisible(0);
+      setPinToBottom(false);
+      return;
+    }
     if (input === "G" || key.end) {
-      setScrollOffset(0);
+      const maxFv = computeMaxFirstVisible(heights, contentRows);
+      setFirstVisible(maxFv);
       setPinToBottom(true);
       return;
     }
 
     if (key.upArrow) {
+      if (expandableIndices.length === 0) return;
+      let nextIdx: number;
       if (selectedIdx < 0) {
-        const expandableIndices = chatMessages
-          .map((m, i) => (m.kind === "tool_call" ? i : -1))
-          .filter((i) => i >= 0);
-        if (expandableIndices.length > 0) {
-          setSelectedIdx(expandableIndices[expandableIndices.length - 1]);
-        }
+        nextIdx = expandableIndices[expandableIndices.length - 1];
       } else {
-        const expandableIndices = chatMessages
-          .map((m, i) => (m.kind === "tool_call" ? i : -1))
-          .filter((i) => i >= 0);
         const curPos = expandableIndices.indexOf(selectedIdx);
-        if (curPos > 0) {
-          const nextIdx = expandableIndices[curPos - 1];
-          setSelectedIdx(nextIdx);
-          // Scroll up if selected item is above the visible window
-          const currentEnd = chatMessages.length - scrollOffset;
-          const currentStart = Math.max(0, currentEnd - maxVisible);
-          if (nextIdx < currentStart) {
-            setScrollOffset(chatMessages.length - nextIdx - maxVisible);
-            setPinToBottom(false);
-          }
-        } else {
-          // Already at the top expandable item — scroll up if there's more
-          const maxOffset = Math.max(0, chatMessages.length - maxVisible);
-          setScrollOffset((prev) => {
-            const next = Math.min(prev + viewportHeight, maxOffset);
-            if (next > 0) setPinToBottom(false);
-            return next;
-          });
-        }
+        if (curPos > 0) nextIdx = expandableIndices[curPos - 1];
+        else nextIdx = expandableIndices[0];
       }
-    } else if (key.downArrow) {
-      if (selectedIdx >= 0) {
-        const expandableIndices = chatMessages
-          .map((m, i) => (m.kind === "tool_call" ? i : -1))
-          .filter((i) => i >= 0);
-        const curPos = expandableIndices.indexOf(selectedIdx);
-        if (curPos < expandableIndices.length - 1) {
-          const nextIdx = expandableIndices[curPos + 1];
-          setSelectedIdx(nextIdx);
-          // Scroll down if selected item is below the visible window
-          const currentEnd = chatMessages.length - scrollOffset;
-          const currentStart = Math.max(0, currentEnd - maxVisible);
-          if (nextIdx >= currentEnd) {
-            const newOffset = Math.max(0, chatMessages.length - nextIdx - 1);
-            setScrollOffset(newOffset);
-            if (newOffset === 0) setPinToBottom(true);
-          }
-        } else {
-          setSelectedIdx(-1);
-          // Snap to bottom when deselecting past the last item
-          setScrollOffset(0);
-          setPinToBottom(true);
-        }
+      setSelectedIdx(nextIdx);
+      setFirstVisible((fv) => {
+        const desired = deriveFirstVisible(heights, nextIdx, contentRows);
+        return Math.min(fv, desired);
+      });
+      setPinToBottom(false);
+      return;
+    }
+    if (key.downArrow) {
+      if (selectedIdx < 0) {
+        const maxFv = computeMaxFirstVisible(heights, contentRows);
+        setFirstVisible((fv) => {
+          const next = Math.min(maxFv, fv + 1);
+          if (next >= maxFv) setPinToBottom(true);
+          return next;
+        });
+        return;
+      }
+      const curPos = expandableIndices.indexOf(selectedIdx);
+      if (curPos >= 0 && curPos < expandableIndices.length - 1) {
+        const nextIdx = expandableIndices[curPos + 1];
+        setSelectedIdx(nextIdx);
+        setFirstVisible((fv) => {
+          const desired = deriveFirstVisible(heights, nextIdx, contentRows);
+          return Math.max(fv, desired);
+        });
       } else {
-        // No selection but pressing down — scroll down if not at bottom
-        if (scrollOffset > 0) {
-          setScrollOffset((prev) => {
-            const next = Math.max(0, prev - viewportHeight);
-            if (next === 0) setPinToBottom(true);
-            return next;
-          });
-        }
+        setSelectedIdx(-1);
+        const maxFv = computeMaxFirstVisible(heights, contentRows);
+        setFirstVisible(maxFv);
+        setPinToBottom(true);
       }
-    } else if ((key.return || input === " ") && selectedIdx >= 0) {
+      return;
+    }
+    if ((key.return || input === " ") && selectedIdx >= 0) {
       const msg = chatMessages[selectedIdx];
       if (msg && msg.kind === "tool_call") {
         setExpandedIds((prev) => {
@@ -141,265 +158,463 @@ export function ChatFeed(): React.ReactElement {
           else next.add(msg.id);
           return next;
         });
+        // After expansion the row is much taller; re-anchor scroll so the
+        // selected row stays visible from the top of the viewport.
+        setFirstVisible(selectedIdx);
+        setPinToBottom(false);
       }
-    } else if (key.escape) {
+      return;
+    }
+    if (key.escape) {
       setSelectedIdx(-1);
+      return;
     }
   });
 
-  // Compute the visible window based on scroll offset
-  const endIdx = chatMessages.length - scrollOffset;
-  const startIdx = Math.max(0, endIdx - maxVisible);
-  const visible = chatMessages.slice(startIdx, endIdx);
-  const hiddenAbove = startIdx;
-  const hiddenBelow = scrollOffset;
+  const safeFirstVisible = clampFirstVisible(firstVisible, heights, contentRows);
 
   return (
-    <Box flexDirection="column" flexGrow={1} overflow="hidden">
-      {hiddenAbove > 0 && (
-        <Box>
-          <Text dimColor>  ··· {hiddenAbove} earlier event{hiddenAbove !== 1 ? "s" : ""} (PgUp/Shift+↑ to scroll, g for top)</Text>
-        </Box>
-      )}
-      {visible.map((msg, i) => {
-        const globalIdx = startIdx + i;
-        return (
-          <ChatMessageRow
-            key={msg.id}
-            msg={msg}
-            expanded={expandedIds.has(msg.id)}
-            selected={globalIdx === selectedIdx}
-          />
-        );
-      })}
-      {hiddenBelow > 0 && (
-        <Box>
-          <Text dimColor>  ··· {hiddenBelow} newer event{hiddenBelow !== 1 ? "s" : ""} (PgDn/Shift+↓ to scroll, G for bottom)</Text>
-        </Box>
-      )}
+    <Box ref={ref} flexDirection="column" flexGrow={1} flexShrink={1} overflow="hidden" width="100%">
+      <ScrollList
+        items={items}
+        selectedIndex={selectedIdx}
+        firstVisible={safeFirstVisible}
+        viewportRows={rows}
+        viewportCols={cols}
+      />
     </Box>
   );
 }
 
-interface RowProps {
-  msg: ChatMessage;
-  expanded: boolean;
-  selected: boolean;
+function computeMaxFirstVisible(heights: number[], contentRows: number): number {
+  if (heights.length === 0 || contentRows <= 0) return 0;
+  // The largest valid firstVisible such that the items from firstVisible
+  // through the end still fill `contentRows` (so the bottom indicator points
+  // to no further content).
+  let used = 0;
+  for (let i = heights.length - 1; i >= 0; i--) {
+    if (used + heights[i] > contentRows) return i + 1;
+    used += heights[i];
+  }
+  return 0;
 }
 
-function ChatMessageRow({ msg, expanded, selected }: RowProps): React.ReactElement | null {
+function buildItem(
+  msg: ChatMessage,
+  idx: number,
+  cols: number,
+  expandedIds: Set<string>,
+  selectedIdx: number
+): ScrollListItem {
+  const selected = idx === selectedIdx;
+  const expanded = expandedIds.has(msg.id);
+
   switch (msg.kind) {
-    case "thinking":
-      return <ThinkingRow msg={msg} />;
-    case "tool_call":
-      return <ToolCallRow msg={msg} expanded={expanded} selected={selected} />;
-    case "phase":
-      return <PhaseRow msg={msg} />;
-    case "learner_feedback":
-      return <LearnerFeedbackRow msg={msg} />;
-    case "error":
-      return (
-        <Box>
-          <Text color="red">{"  ✗ "}{msg.text}</Text>
-        </Box>
-      );
-    case "status":
-      return (
-        <Box paddingLeft={2}>
-          <Text wrap="wrap">{msg.text}</Text>
-        </Box>
-      );
-    default:
-      return null;
-  }
-}
-
-function ThinkingRow({ msg }: { msg: ChatMessage }): React.ReactElement | null {
-  const text = (msg.text || "").trimEnd();
-  if (!text) return null;
-
-  return (
-    <Box flexDirection="column" paddingLeft={2}>
-      <Text wrap="wrap">{text}</Text>
-    </Box>
-  );
-}
-
-function ToolCallRow({ msg, expanded, selected }: { msg: ChatMessage; expanded: boolean; selected: boolean }): React.ReactElement {
-  const isRunning = msg.toolStatus === "running";
-  const isError = msg.toolStatus === "error";
-  const caret = expanded ? "▾" : "▸";
-  const selIndicator = selected ? "›" : " ";
-  const [imageText, setImageText] = useState<string | null>(null);
-  const [imageLoading, setImageLoading] = useState(false);
-
-  useEffect(() => {
-    if (expanded && msg.toolImagePath && existsSync(msg.toolImagePath)) {
-      setImageLoading(true);
-      import("terminal-image").then((ti) =>
-        ti.default.file(msg.toolImagePath!, { width: 60, height: 20 }).then((text: string) => {
-          if (text && text.trim().length > 0) {
-            setImageText(text);
-          } else {
-            setImageText(null);
-          }
-          setImageLoading(false);
-        })
-      ).catch(() => {
-        setImageText(null);
-        setImageLoading(false);
-      });
-    } else if (!expanded) {
-      setImageText(null);
-      setImageLoading(false);
+    case "thinking": {
+      const lines = wrapLines((msg.text || "").trimEnd(), Math.max(1, cols - 2), MAX_THINKING_LINES);
+      if (lines.length === 0) {
+        return { key: msg.id, height: 0, render: () => null };
+      }
+      return {
+        key: msg.id,
+        height: lines.length,
+        render: ({ cols: c }) => <PaddedLines lines={lines} cols={c} indent={2} />,
+      };
     }
-  }, [expanded, msg.toolImagePath]);
-
-  return (
-    <Box flexDirection="column">
-      <Box>
-        <Text color={selected ? "yellow" : undefined}>{selIndicator} </Text>
-        {isRunning ? (
-          <Text color="cyan"><Spinner type="dots" />{" "}</Text>
-        ) : isError ? (
-          <Text color="red">{"✗ "}</Text>
-        ) : (
-          <Text color="green">{caret} </Text>
-        )}
-        <Text color="cyan" bold>{msg.toolName}</Text>
-        {!expanded && msg.toolArgs && Object.keys(msg.toolArgs).length > 0 && (
-          <Text dimColor>{" "}{formatArgs(msg.toolArgs)}</Text>
-        )}
-        {!expanded && !isRunning && msg.toolResult && (
-          <Text dimColor>{" → "}{truncate(msg.toolResult.replace(/\n/g, " "), 40)}</Text>
-        )}
-        {!expanded && msg.toolImagePath && (
-          <Text dimColor>{" 🖼"}</Text>
-        )}
-      </Box>
-      {expanded && (
-        <Box flexDirection="column" paddingLeft={4}>
-          {msg.toolArgs && Object.keys(msg.toolArgs).length > 0 && (
-            <Box>
-              <Text dimColor>Args: </Text>
-              <Text>{JSON.stringify(msg.toolArgs, null, 2).slice(0, 200)}</Text>
-            </Box>
-          )}
-          {msg.toolResult && (
-            <Box>
-              <Text dimColor>Result: </Text>
-              <Text wrap="wrap">{msg.toolResult.slice(0, 300)}</Text>
-            </Box>
-          )}
-          {msg.toolImagePath && (
-            <Box flexDirection="column" marginTop={1}>
-              <Text dimColor>Screenshot: <Text color="blue">{msg.toolImagePath}</Text></Text>
-              {imageLoading && (
-                <Box>
-                  <Text color="cyan"><Spinner type="dots" /></Text>
-                  <Text dimColor> loading image...</Text>
-                </Box>
-              )}
-              {imageText && <Text>{imageText}</Text>}
-            </Box>
-          )}
-        </Box>
-      )}
-    </Box>
-  );
+    case "status": {
+      const lines = wrapLines(msg.text || "", Math.max(1, cols - 2), MAX_STATUS_LINES);
+      if (lines.length === 0) {
+        return { key: msg.id, height: 1, render: ({ cols: c }) => <BlankRow cols={c} /> };
+      }
+      return {
+        key: msg.id,
+        height: lines.length,
+        render: ({ cols: c }) => <PaddedLines lines={lines} cols={c} indent={2} />,
+      };
+    }
+    case "error": {
+      const text = "  \u2717 " + (msg.text || "");
+      const lines = wrapLines(text, Math.max(1, cols), 2);
+      return {
+        key: msg.id,
+        height: Math.max(1, lines.length),
+        render: ({ cols: c }) => <ColoredLines lines={lines} cols={c} color="red" />,
+      };
+    }
+    case "phase": {
+      if (msg.phaseStatus === "pending") {
+        return { key: msg.id, height: 0, render: () => null };
+      }
+      if (msg.phaseStatus === "running" && msg.id.startsWith("sep-")) {
+        return { key: msg.id, height: 0, render: () => null };
+      }
+      return {
+        key: msg.id,
+        height: 1,
+        render: ({ cols: c }) => <PhaseRow msg={msg} cols={c} />,
+      };
+    }
+    case "tool_call": {
+      return buildToolCallItem(msg, cols, expanded, selected);
+    }
+    case "learner_feedback": {
+      return buildFeedbackItem(msg, cols);
+    }
+    default:
+      return { key: msg.id, height: 0, render: () => null };
+  }
 }
 
-function PhaseRow({ msg }: { msg: ChatMessage }): React.ReactElement | null {
-  if (!msg.phase) return null;
-
-  if (msg.phaseStatus === "pending") return null;
-
-  // Sentinels from thinking_clear use "running" status but are just separators
-  if (msg.phaseStatus === "running" && msg.id.startsWith("sep-")) return null;
-
-  if (msg.phaseStatus === "running") {
-    return (
-      <Box paddingLeft={2}>
-        <Text color="cyan"><Spinner type="dots" />{" "}</Text>
-        <Text color="cyan" bold>{msg.phase}</Text>
-        {msg.phaseSummary && (
-          <Text dimColor>{" - "}{msg.phaseSummary}</Text>
-        )}
-      </Box>
-    );
+function buildToolCallItem(
+  msg: ChatMessage,
+  cols: number,
+  expanded: boolean,
+  selected: boolean
+): ScrollListItem {
+  const headerHeight = 1;
+  let bodyHeight = 0;
+  let argLines: string[] = [];
+  let resultLines: string[] = [];
+  let imagePresent = false;
+  let imagePathLine = "";
+  if (expanded) {
+    if (msg.toolArgs && Object.keys(msg.toolArgs).length > 0) {
+      const argText = "Args: " + JSON.stringify(msg.toolArgs, null, 2).slice(0, 600);
+      argLines = wrapLines(argText, Math.max(1, cols - 4), MAX_ARG_LINES);
+      bodyHeight += argLines.length;
+    }
+    if (msg.toolResult) {
+      const resText = "Result: " + msg.toolResult.slice(0, 800);
+      resultLines = wrapLines(resText, Math.max(1, cols - 4), MAX_RESULT_LINES);
+      bodyHeight += resultLines.length;
+    }
+    if (msg.toolImagePath && existsSync(msg.toolImagePath)) {
+      imagePresent = true;
+      imagePathLine = "Screenshot: " + msg.toolImagePath;
+      bodyHeight += 1; // "Screenshot: ..." line
+      bodyHeight += IMAGE_HEIGHT;
+    }
   }
 
-  const statusIcon =
-    msg.phaseStatus === "complete" ? "✓" :
-    msg.phaseStatus === "failed" ? "✗" :
-    msg.phaseStatus === "skipped" ? "—" : "○";
-
-  const color =
-    msg.phaseStatus === "complete" ? "green" :
-    msg.phaseStatus === "failed" ? "red" : "gray";
-
-  return (
-    <Box paddingLeft={2}>
-      <Text color={color} bold>{statusIcon} {msg.phase}</Text>
-      {msg.phaseSummary && (
-        <Text dimColor>{" - "}{msg.phaseSummary}</Text>
-      )}
-    </Box>
-  );
+  const height = headerHeight + bodyHeight;
+  return {
+    key: msg.id,
+    height,
+    render: ({ cols: c }) => (
+      <ToolCallRow
+        msg={msg}
+        cols={c}
+        expanded={expanded}
+        selected={selected}
+        argLines={argLines}
+        resultLines={resultLines}
+        imagePresent={imagePresent}
+        imagePathLine={imagePathLine}
+      />
+    ),
+  };
 }
 
-function LearnerFeedbackRow({ msg }: { msg: ChatMessage }): React.ReactElement | null {
-  let data: Record<string, unknown>;
+function buildFeedbackItem(msg: ChatMessage, cols: number): ScrollListItem {
+  let data: Record<string, unknown> | null = null;
   try {
-    data = JSON.parse(msg.text || "{}");
+    data = JSON.parse(msg.text || "{}") as Record<string, unknown>;
   } catch {
-    return null;
+    return { key: msg.id, height: 0, render: () => null };
   }
 
-  const summary = data.summary as string | undefined;
-  const failurePoint = data.failure_point as string | undefined;
+  const summary = (data.summary as string) || "";
+  const failurePoint = (data.failure_point as string) || "";
   const suggestions = (data.suggestions as Array<Record<string, unknown>>) ?? [];
   const newSkills = (data.new_skill_candidates as Array<Record<string, unknown>>) ?? [];
 
+  const innerCols = Math.max(1, cols - 4);
+  const lines: { text: string; color?: string; bold?: boolean; dim?: boolean }[] = [];
+  lines.push({ text: "Learner Diagnosis", color: "magenta", bold: true });
+  if (summary) {
+    for (const l of wrapLines(summary, innerCols, 3)) lines.push({ text: l });
+  }
+  if (failurePoint) {
+    for (const l of wrapLines("Failure: " + failurePoint, innerCols, 2)) {
+      lines.push({ text: l, color: "red" });
+    }
+  }
+  if (suggestions.length > 0) {
+    lines.push({ text: "Suggestions:", dim: true, bold: true });
+    for (const s of suggestions.slice(0, 3)) {
+      const cat = (s.category as string) || "";
+      const desc = (s.description as string) || "";
+      for (const l of wrapLines(`\u2022 [${cat}] ${desc}`, innerCols, 2)) {
+        lines.push({ text: l });
+      }
+    }
+  }
+  if (newSkills.length > 0) {
+    lines.push({ text: "Proposed skills:", dim: true, bold: true });
+    for (const s of newSkills.slice(0, 3)) {
+      const id = (s.proposed_id as string) || "";
+      const desc = (s.description as string) || "";
+      for (const l of wrapLines(`\u2022 ${id} \u2014 ${desc}`, innerCols, 2)) {
+        lines.push({ text: l });
+      }
+    }
+  }
+
+  const capped = lines.slice(0, MAX_FEEDBACK_LINES);
+  return {
+    key: msg.id,
+    height: capped.length,
+    render: ({ cols: c }) => <FeedbackRows lines={capped} cols={c} />,
+  };
+}
+
+function PaddedLines({
+  lines,
+  cols,
+  indent,
+}: {
+  lines: string[];
+  cols: number;
+  indent: number;
+}): React.ReactElement {
+  const prefix = " ".repeat(Math.max(0, indent));
   return (
-    <Box flexDirection="column" paddingLeft={2} marginY={1}>
-      <Text color="magenta" bold>{"Learner Diagnosis"}</Text>
-      {summary && (
-        <Box paddingLeft={2}>
-          <Text wrap="wrap">{summary}</Text>
+    <>
+      {lines.map((line, i) => (
+        <Text key={i}>{padEnd(prefix + line, cols)}</Text>
+      ))}
+    </>
+  );
+}
+
+function ColoredLines({
+  lines,
+  cols,
+  color,
+}: {
+  lines: string[];
+  cols: number;
+  color: string;
+}): React.ReactElement {
+  return (
+    <>
+      {lines.map((line, i) => (
+        <Box key={i} width={cols} height={1} flexShrink={0}>
+          <Text color={color}>{line}</Text>
+          <Text>{" ".repeat(Math.max(0, cols - visualWidth(line)))}</Text>
         </Box>
-      )}
-      {failurePoint && (
-        <Box paddingLeft={2}>
-          <Text color="red" bold>Failure: </Text>
-          <Text wrap="wrap">{failurePoint}</Text>
-        </Box>
-      )}
-      {suggestions.length > 0 && (
-        <Box flexDirection="column" paddingLeft={2}>
-          <Text dimColor bold>Suggestions:</Text>
-          {suggestions.slice(0, 5).map((s, i) => (
-            <Box key={i} paddingLeft={1}>
-              <Text dimColor>• </Text>
-              <Text color="yellow">[{s.category as string}] </Text>
-              <Text wrap="wrap">{s.description as string}</Text>
-            </Box>
-          ))}
-        </Box>
-      )}
-      {newSkills.length > 0 && (
-        <Box flexDirection="column" paddingLeft={2}>
-          <Text dimColor bold>Proposed skills:</Text>
-          {newSkills.map((s, i) => (
-            <Box key={i} paddingLeft={1}>
-              <Text dimColor>• </Text>
-              <Text color="cyan">{s.proposed_id as string}</Text>
-              <Text dimColor>{" — "}{s.description as string}</Text>
-            </Box>
-          ))}
-        </Box>
-      )}
+      ))}
+    </>
+  );
+}
+
+function BlankRow({ cols }: { cols: number }): React.ReactElement {
+  return <Text>{" ".repeat(cols)}</Text>;
+}
+
+function PhaseRow({ msg, cols }: { msg: ChatMessage; cols: number }): React.ReactElement {
+  if (msg.phaseStatus === "running") {
+    const summary = msg.phaseSummary ? ` - ${msg.phaseSummary}` : "";
+    const text = `  ${msg.phase}${summary}`;
+    return (
+      <Box width={cols} height={1} flexShrink={0}>
+        <Text color="cyan"><Spinner type="dots" /></Text>
+        <Text color="cyan" bold>{` ${msg.phase}`}</Text>
+        {summary && <Text dimColor>{summary}</Text>}
+        <Text>{" ".repeat(Math.max(0, cols - visualWidth(text) - 1))}</Text>
+      </Box>
+    );
+  }
+  const statusIcon =
+    msg.phaseStatus === "complete" ? "\u2713" :
+    msg.phaseStatus === "failed" ? "\u2717" :
+    msg.phaseStatus === "skipped" ? "\u2014" : "\u25CB";
+  const color =
+    msg.phaseStatus === "complete" ? "green" :
+    msg.phaseStatus === "failed" ? "red" : "gray";
+  const summaryText = msg.phaseSummary ? ` - ${msg.phaseSummary}` : "";
+  const fullText = `  ${statusIcon} ${msg.phase}${summaryText}`;
+  return (
+    <Box width={cols} height={1} flexShrink={0}>
+      <Text color={color} bold>{`  ${statusIcon} ${msg.phase}`}</Text>
+      {summaryText && <Text dimColor>{summaryText}</Text>}
+      <Text>{" ".repeat(Math.max(0, cols - visualWidth(fullText)))}</Text>
     </Box>
+  );
+}
+
+interface ToolCallRowProps {
+  msg: ChatMessage;
+  cols: number;
+  expanded: boolean;
+  selected: boolean;
+  argLines: string[];
+  resultLines: string[];
+  imagePresent: boolean;
+  imagePathLine: string;
+}
+
+function ToolCallRow({
+  msg,
+  cols,
+  expanded,
+  selected,
+  argLines,
+  resultLines,
+  imagePresent,
+  imagePathLine,
+}: ToolCallRowProps): React.ReactElement {
+  const isRunning = msg.toolStatus === "running";
+  const isError = msg.toolStatus === "error";
+  const caret = expanded ? "\u25BE" : "\u25B8";
+  const selIndicator = selected ? "\u203A" : " ";
+
+  // Header line
+  const argSummary = !expanded && msg.toolArgs && Object.keys(msg.toolArgs).length > 0
+    ? " " + formatArgs(msg.toolArgs)
+    : "";
+  const resultSummary = !expanded && !isRunning && msg.toolResult
+    ? " \u2192 " + truncateInline(msg.toolResult.replace(/\n/g, " "), 40)
+    : "";
+  const imageMarker = !expanded && msg.toolImagePath ? " \u{1F5BC}" : "";
+
+  const headerVisible = `${selIndicator} ${caret} ${msg.toolName ?? ""}${argSummary}${resultSummary}${imageMarker}`;
+  const headerTrailing = " ".repeat(Math.max(0, cols - visualWidth(headerVisible)));
+
+  // Image rendering: load text once per expand
+  const [imageText, setImageText] = useState<string | null>(null);
+  const [imageLoading, setImageLoading] = useState(false);
+  useEffect(() => {
+    if (!imagePresent || !msg.toolImagePath) {
+      setImageText(null);
+      setImageLoading(false);
+      return;
+    }
+    setImageLoading(true);
+    let cancelled = false;
+    import("terminal-image")
+      .then((ti) =>
+        ti.default
+          .file(msg.toolImagePath!, { width: Math.min(60, Math.max(20, cols - 8)), height: IMAGE_HEIGHT })
+          .then((text: string) => {
+            if (cancelled) return;
+            setImageText(text && text.trim().length > 0 ? text : null);
+            setImageLoading(false);
+          })
+      )
+      .catch(() => {
+        if (cancelled) return;
+        setImageText(null);
+        setImageLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [imagePresent, msg.toolImagePath, cols]);
+
+  return (
+    <>
+      <Box width={cols} height={1} flexShrink={0}>
+        <Text color={selected ? "yellow" : undefined}>{`${selIndicator} `}</Text>
+        {isRunning ? (
+          <Text color="cyan"><Spinner type="dots" />{" "}</Text>
+        ) : isError ? (
+          <Text color="red">{"\u2717 "}</Text>
+        ) : (
+          <Text color="green">{`${caret} `}</Text>
+        )}
+        <Text color="cyan" bold>{msg.toolName ?? ""}</Text>
+        {argSummary && <Text dimColor>{argSummary}</Text>}
+        {resultSummary && <Text dimColor>{resultSummary}</Text>}
+        {imageMarker && <Text dimColor>{imageMarker}</Text>}
+        <Text>{headerTrailing}</Text>
+      </Box>
+      {expanded &&
+        argLines.map((line, i) => (
+          <Box key={`arg-${i}`} width={cols} height={1} flexShrink={0}>
+            <Text dimColor>{padEnd("    " + line, cols)}</Text>
+          </Box>
+        ))}
+      {expanded &&
+        resultLines.map((line, i) => (
+          <Box key={`res-${i}`} width={cols} height={1} flexShrink={0}>
+            <Text>{padEnd("    " + line, cols)}</Text>
+          </Box>
+        ))}
+      {expanded && imagePresent && (
+        <>
+          <Box width={cols} height={1} flexShrink={0}>
+            <Text dimColor>{padEnd("    " + imagePathLine, cols)}</Text>
+          </Box>
+          <ImageBlock
+            cols={cols}
+            height={IMAGE_HEIGHT}
+            text={imageText}
+            loading={imageLoading}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+function ImageBlock({
+  cols,
+  height,
+  text,
+  loading,
+}: {
+  cols: number;
+  height: number;
+  text: string | null;
+  loading: boolean;
+}): React.ReactElement {
+  // Always render exactly `height` rows so the layout never shifts.
+  const lines = text ? text.split(/\r?\n/) : [];
+  const out: React.ReactElement[] = [];
+  for (let i = 0; i < height; i++) {
+    if (i === 0 && loading) {
+      out.push(
+        <Box key={`img-${i}`} width={cols} height={1} flexShrink={0}>
+          <Text color="cyan"><Spinner type="dots" /></Text>
+          <Text dimColor>{padEnd(" loading image...", cols - 1)}</Text>
+        </Box>
+      );
+      continue;
+    }
+    const raw = lines[i] ?? "";
+    out.push(
+      <Box key={`img-${i}`} width={cols} height={1} flexShrink={0}>
+        <Text>{raw}</Text>
+        <Text>{" ".repeat(Math.max(0, cols - visualWidth(raw)))}</Text>
+      </Box>
+    );
+  }
+  return <>{out}</>;
+}
+
+function FeedbackRows({
+  lines,
+  cols,
+}: {
+  lines: { text: string; color?: string; bold?: boolean; dim?: boolean }[];
+  cols: number;
+}): React.ReactElement {
+  return (
+    <>
+      {lines.map((line, i) => {
+        const indented = "  " + line.text;
+        const trailing = " ".repeat(Math.max(0, cols - visualWidth(indented)));
+        return (
+          <Box key={i} width={cols} height={1} flexShrink={0}>
+            <Text color={line.color} bold={line.bold} dimColor={line.dim}>
+              {indented}
+            </Text>
+            <Text>{trailing}</Text>
+          </Box>
+        );
+      })}
+    </>
   );
 }
 
@@ -407,15 +622,15 @@ function formatArgs(args: Record<string, unknown>): string {
   const entries = Object.entries(args);
   if (entries.length === 0) return "";
   const parts = entries.slice(0, 3).map(([k, v]) => {
-    if (typeof v === "string") return `${k}="${truncate(v, 20)}"`;
+    if (typeof v === "string") return `${k}="${truncateInline(v, 20)}"`;
     if (typeof v === "number" || typeof v === "boolean") return `${k}=${v}`;
-    return `${k}=…`;
+    return `${k}=\u2026`;
   });
-  if (entries.length > 3) parts.push("…");
+  if (entries.length > 3) parts.push("\u2026");
   return parts.join(" ");
 }
 
-function truncate(s: string, max: number): string {
+function truncateInline(s: string, max: number): string {
   if (s.length <= max) return s;
-  return s.slice(0, max - 1) + "…";
+  return s.slice(0, max - 1) + "\u2026";
 }

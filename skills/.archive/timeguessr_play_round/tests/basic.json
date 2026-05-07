@@ -1,0 +1,16 @@
+{
+  "name": "basic",
+  "inputs": {
+    "round_index": 0,
+    "guess_button_x": 960,
+    "guess_button_y": 900
+  },
+  "expected_output": {
+    "round_index": 0,
+    "lat": 0.0,
+    "lng": 0.0,
+    "year": 0,
+    "guess_clicked": true
+  },
+  "validation_mode": "schema_only"
+}

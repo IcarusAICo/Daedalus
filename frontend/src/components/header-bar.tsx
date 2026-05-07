@@ -26,6 +26,8 @@ export function HeaderBar(): React.ReactElement {
       paddingX={1}
       justifyContent="space-between"
       width="100%"
+      height={3}
+      flexShrink={0}
     >
       <Box gap={2}>
         <Text bold color="cyan">
