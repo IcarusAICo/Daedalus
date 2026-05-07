@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-SkillKindLiteral = Literal["atomic", "daemon"]
+SkillKindLiteral = Literal["atomic", "daemon", "service"]
 
 # Side effects a skill is allowed to declare. Used by the static safety lint
 # in the Implementor (Phase 2) and by the executor for transparency in the

@@ -48,6 +48,9 @@ def _read_spec_yaml(path: Path) -> SkillSpec:
     raw = yaml.safe_load(path.read_text())
     if not isinstance(raw, dict):
         raise LoaderError(f"spec.yaml at {path} must be a mapping, got {type(raw).__name__}")
+    # Coerce tags to strings — YAML parses bare numbers (e.g. 2048) as int.
+    if "tags" in raw and isinstance(raw["tags"], list):
+        raw["tags"] = [str(t) for t in raw["tags"]]
     try:
         return SkillSpec.from_dict(raw)
     except Exception as exc:
@@ -155,6 +158,8 @@ def load_library(skills_root: Path, registry: Registry | None = None) -> list[st
     ids: list[str] = []
     for child in sorted(skills_root.iterdir()):
         if not child.is_dir():
+            continue
+        if child.name == "_temp":
             continue
         if not (child / "spec.yaml").exists():
             continue

@@ -1,6 +1,5 @@
 # Grounding service dependencies.
-# Pinned to transformers 4.46.x for Florence-2 remote code compatibility.
-transformers>=4.46.0,<4.50.0
+transformers>=4.57.0
 torch>=2.0.0
 torchvision>=0.15.0
 ultralytics>=8.0.0

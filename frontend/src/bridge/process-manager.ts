@@ -87,9 +87,16 @@ export class ProcessManager {
 
   constructor(private projectRoot: string) {}
 
-  start(goal: string, configPath?: string, mode: "learn" | "explore" | "plan" = "learn"): void {
+  start(goal: string, configPath?: string, mode: "learn" | "explore" | "plan" | "test" = "learn"): void {
     const store = useAgentStore.getState();
-    const args = ["run", "--goal", goal, "--frontend-mode", "--mode", mode];
+    const args = ["run", "--frontend-mode", "--mode", mode];
+
+    // Goal is optional for test mode
+    if (goal) {
+      args.push("--goal", goal);
+    } else if (mode !== "test") {
+      args.push("--goal", goal);
+    }
 
     // Always provide --config: use the explicit config file, or generate one
     const effectiveConfig = configPath || buildTempConfig(store.config, this.projectRoot);
@@ -153,8 +160,15 @@ export class ProcessManager {
       useAgentStore.getState().setError(`Bridge error: ${err.message}`);
     });
 
-    useAgentStore.getState().setGoal(goal);
+    useAgentStore.getState().setGoal(goal || "[test mode]");
     this.bridge.start();
+  }
+
+  executeSkill(skillId: string, inputs: Record<string, unknown>): Promise<{ success: boolean; outputs?: Record<string, unknown>; error?: string }> {
+    if (!this.bridge) {
+      return Promise.resolve({ success: false, error: "not connected" });
+    }
+    return this.bridge.call("execute_skill", { skill_id: skillId, inputs }) as Promise<{ success: boolean; outputs?: Record<string, unknown>; error?: string }>;
   }
 
   private handleNotification(msg: JsonRpcNotification): void {

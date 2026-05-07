@@ -1,0 +1,27 @@
+id: paste_text
+version: 0.1.0
+kind: atomic
+description: Paste text into the currently focused input field by writing to the macOS
+  clipboard via NSPasteboard and triggering Cmd+V. Avoids auto-correct and IME issues.
+side_effects:
+- screen_input
+preconditions:
+- backend.connected
+- macOS with PyObjC available
+- an input field is focused
+postconditions:
+- clipboard contains the given text
+- text has been pasted into the focused field
+examples:
+- inputs:
+    text: Hello, World!
+  expected:
+    success: true
+    text_length: 13
+tests:
+- basic.json
+tags:
+- clipboard
+- input
+- macos
+- text

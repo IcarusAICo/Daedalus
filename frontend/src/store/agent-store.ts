@@ -49,7 +49,7 @@ interface AgentActions {
   setConfig: (config: Partial<DaedalusConfig>) => void;
   toggleConfig: () => void;
   setContextUsage: (used: number, max: number) => void;
-  setRunMode: (mode: "learn" | "explore" | "plan") => void;
+  setRunMode: (mode: "learn" | "explore" | "plan" | "test") => void;
   reset: () => void;
 }
 

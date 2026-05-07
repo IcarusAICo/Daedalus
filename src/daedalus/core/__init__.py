@@ -16,7 +16,7 @@ from daedalus.core.registry import (
     register,
     use_registry,
 )
-from daedalus.core.skill import AtomicSkill, DaemonSkill, Skill, SkillKind
+from daedalus.core.skill import AtomicSkill, DaemonSkill, ServiceSkill, Skill, SkillKind
 from daedalus.core.spec import SkillSpec, SkillVersion
 from daedalus.core.store import RunStore
 
@@ -29,6 +29,7 @@ __all__ = [
     "PreconditionError",
     "Registry",
     "RunStore",
+    "ServiceSkill",
     "Skill",
     "SkillKind",
     "SkillNotFoundError",

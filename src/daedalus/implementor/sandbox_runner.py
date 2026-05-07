@@ -62,6 +62,8 @@ def main() -> None:
                 expected_output = fixture.get("expected_output", {})
                 expected_events = fixture.get("expected_events", [])
                 ignore_keys = set(fixture.get("ignore_output_keys", []))
+                validation_mode = fixture.get("validation_mode", "exact")
+                valid_outputs = fixture.get("valid_outputs", [])
 
                 with tempfile.TemporaryDirectory() as tmp:
                     tmpdir = Path(tmp)
@@ -83,10 +85,32 @@ def main() -> None:
 
                 actual = {k: v for k, v in out_dict.items() if k not in ignore_keys}
                 expected = {k: v for k, v in expected_output.items() if k not in ignore_keys}
-                if actual != expected:
+
+                if validation_mode == "any_valid":
+                    # Only check the output is one of the acceptable values,
+                    # or if valid_outputs is empty, just check it ran without error.
+                    if valid_outputs and actual not in valid_outputs:
+                        fx_result["ok"] = False
+                        fx_result["message"] = f"output {actual} not in valid_outputs"
+                elif validation_mode == "schema_only":
+                    # Check output has expected keys with matching types.
+                    for key, val in expected.items():
+                        if key not in actual:
+                            fx_result["ok"] = False
+                            fx_result["message"] = f"missing key {key!r} in output"
+                            break
+                        if type(actual[key]) is not type(val):
+                            fx_result["ok"] = False
+                            fx_result["message"] = (
+                                f"key {key!r}: expected type {type(val).__name__}, "
+                                f"got {type(actual[key]).__name__}"
+                            )
+                            break
+                elif actual != expected:
                     fx_result["ok"] = False
                     fx_result["message"] = f"output {actual} != expected {expected}"
-                else:
+                
+                if fx_result["ok"] and validation_mode == "exact":
                     search_start = 0
                     for want in expected_events:
                         op = want["op"]

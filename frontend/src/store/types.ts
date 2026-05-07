@@ -176,7 +176,7 @@ export interface AgentState {
   error: string | null;
   showConfig: boolean;
   contextUsage: { used: number; max: number } | null;
-  runMode: "learn" | "explore" | "plan" | null;
+  runMode: "learn" | "explore" | "plan" | "test" | null;
 }
 
 export const DEFAULT_CONFIG: DaedalusConfig = {

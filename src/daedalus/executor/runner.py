@@ -99,6 +99,7 @@ class SequentialExecutor:
         *,
         program_ref: str | None = None,
         success_criteria: SuccessCriteria | None = None,
+        task_id: str | None = None,
     ) -> RunResult:
         validate_program_against_registry(program, self._registry)
 
@@ -107,6 +108,7 @@ class SequentialExecutor:
             db_path=self._tasks_db,
             task_name=program.name,
             program_ref=program_ref,
+            task_id=task_id,
         )
         if self._llm is not None:
             self._llm.set_tracer(tracer)

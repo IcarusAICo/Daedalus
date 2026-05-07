@@ -52,6 +52,14 @@ class LocateRequest(BaseModel):
     description: str = Field(description="Natural-language description, e.g. 'submit button'.")
     mode: Literal["point", "box", "all"] = "point"
     confidence_threshold: float = 0.3
+    target_width: int | None = Field(
+        default=None,
+        description="If set, return coordinates mapped to this width instead of image width.",
+    )
+    target_height: int | None = Field(
+        default=None,
+        description="If set, return coordinates mapped to this height instead of image height.",
+    )
 
 
 class LocateMatch(BaseModel):

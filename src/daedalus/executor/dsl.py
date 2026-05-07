@@ -203,9 +203,10 @@ def validate_program_against_registry(
         except SkillValidationError as exc:
             errors.append(f"{prefix}: {exc}")
             return
-        if entry.cls.SPEC.kind != expected_kind:
+        actual_kind = entry.cls.SPEC.kind
+        if actual_kind != expected_kind and not (expected_kind == "atomic" and actual_kind == "service"):
             errors.append(
-                f"{prefix}: skill {skill_id!r} is kind={entry.cls.SPEC.kind!r}, "
+                f"{prefix}: skill {skill_id!r} is kind={actual_kind!r}, "
                 f"expected {expected_kind!r}"
             )
             return

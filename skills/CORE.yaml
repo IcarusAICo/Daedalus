@@ -9,9 +9,9 @@ core_skills:
   - assert_screen_contains
   - click_all
   - click_element
+  - extract_text
   - locate_element
   - locate_elements
-  - monitor_text_region
   - mouse
   - populate_store_from_analysis
   - scroll

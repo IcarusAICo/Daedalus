@@ -7,7 +7,7 @@ import { parse as parseYaml } from "yaml";
 import { useAgentStore } from "./store/agent-store.js";
 import { ProcessManager } from "./bridge/process-manager.js";
 import { loadTrace, resolveTraceDir } from "./bridge/trace-loader.js";
-import { loadState, pushGoal, setLastConfig } from "./store/persistence.js";
+import { loadState, pushGoal, setLastConfig, persistConfig } from "./store/persistence.js";
 import { HeaderBar } from "./components/header-bar.js";
 import { StatusBar } from "./components/status-bar.js";
 import { GoalDisplay } from "./components/goal-display.js";
@@ -41,29 +41,33 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
   const currentPhase = useAgentStore((s) => s.currentPhase);
   const phases = useAgentStore((s) => s.phases);
 
-  const [inputMode, setInputMode] = useState<"idle" | "goal">(goal || tracePath ? "idle" : "goal");
+  const [inputMode, setInputMode] = useState<"idle" | "goal" | "test">(goal || tracePath ? "idle" : "goal");
   const [goalInput, setGoalInput] = useState("");
   const [cursorPos, setCursorPos] = useState(0);
   const [historyIdx, setHistoryIdx] = useState(-1);
   const [showTraces, setShowTraces] = useState(false);
   const [isReplay, setIsReplay] = useState(false);
 
-  // Input is "active" when user is typing (goal prompt or confirm comment)
-  const inputActive = inputMode === "goal" && !storeGoal;
+  // Input is "active" when user is typing (goal prompt, test skill commands, or confirm comment)
+  const inputActive = (inputMode === "goal" && !storeGoal) || inputMode === "test";
 
   useKeybindings(manager, inputActive);
 
   const startRun = useCallback(
-    (g: string, runMode: "learn" | "explore" | "plan" = "learn") => {
+    (g: string, runMode: "learn" | "explore" | "plan" | "test" = "learn") => {
       const storeConfigPath = useAgentStore.getState().configPath;
       const effectiveConfig = storeConfigPath
         ? resolve(projectRoot, storeConfigPath)
         : configPath;
-      pushGoal(g);
-      goalHistory.current = [g, ...goalHistory.current.filter((h) => h !== g)].slice(0, 100);
+      if (g) pushGoal(g);
+      if (g) goalHistory.current = [g, ...goalHistory.current.filter((h) => h !== g)].slice(0, 100);
       useAgentStore.getState().setRunMode(runMode);
       manager.start(g, effectiveConfig, runMode);
-      setInputMode("idle");
+      if (runMode === "test") {
+        setInputMode("test");
+      } else {
+        setInputMode("idle");
+      }
       setHistoryIdx(-1);
     },
     [manager, configPath, projectRoot]
@@ -73,65 +77,84 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
   React.useEffect(() => {
     const store = useAgentStore.getState();
 
-    const cfgToLoad = configPath
-      ? configPath
-      : (!store.configPath && persistedState.current.lastConfigPath)
-        ? persistedState.current.lastConfigPath
-        : (!store.configPath && existsSync(resolve(projectRoot, "config.local.yaml")))
-          ? "config.local.yaml"
-          : null;
+    // If we have a persisted config snapshot, restore it directly
+    if (persistedState.current.config && !configPath) {
+      store.setConfig(persistedState.current.config);
+      store.setConfigPath(persistedState.current.lastConfigPath);
+    } else {
+      // Otherwise load from file
+      const cfgToLoad = configPath
+        ? configPath
+        : (!store.configPath && persistedState.current.lastConfigPath)
+          ? persistedState.current.lastConfigPath
+          : (!store.configPath && existsSync(resolve(projectRoot, "config.local.yaml")))
+            ? "config.local.yaml"
+            : null;
 
-    if (cfgToLoad) {
-      store.setConfigPath(cfgToLoad);
-      setLastConfig(cfgToLoad);
-      try {
-        const fullPath = resolve(projectRoot, cfgToLoad);
-        const raw = parseYaml(readFileSync(fullPath, "utf-8")) || {};
-        const patch: Record<string, unknown> = {};
-        const be = raw.backend || {};
-        const vnc = be.vnc || {};
-        patch.backend = {
-          kind: be.kind || "vnc",
-          host: vnc.host || "127.0.0.1",
-          port: vnc.port || 5900,
-          hostOs: be.host_os || "unknown",
-          passwordEnv: vnc.password_env,
-          usernameEnv: vnc.username_env,
-          maxWidth: vnc.max_width,
-          maxHeight: vnc.max_height,
-        };
-        const llm = raw.llm || {};
-        const roles = llm.roles || {};
-        patch.llmRoles = roles;
-        if (llm.aws_region) patch.llmAwsRegion = llm.aws_region;
-        if (llm.request_timeout_s) patch.llmRequestTimeoutS = llm.request_timeout_s;
-        if (llm.creative_temperature !== undefined) patch.llmCreativeTemp = llm.creative_temperature;
-        if (llm.analytical_temperature !== undefined) patch.llmAnalyticalTemp = llm.analytical_temperature;
-        const exec = raw.executor || {};
-        patch.executor = {
-          defaultScreenWidth: exec.default_screen_width || 1920,
-          defaultScreenHeight: exec.default_screen_height || 1080,
-          stepTimeoutS: exec.step_timeout_s || 60,
-        };
-        const agent = raw.agent || {};
-        if (agent.max_retries !== undefined) patch.maxRetries = agent.max_retries;
-        if (agent.explore_steps !== undefined) patch.exploreSteps = agent.explore_steps;
-        if (agent.no_strategy !== undefined) patch.noStrategy = agent.no_strategy;
-        if (agent.verbose !== undefined) patch.verbose = agent.verbose;
-        if (agent.record !== undefined) patch.record = agent.record;
-        if (agent.record_fps !== undefined) patch.recordFps = agent.record_fps;
-        if (agent.yolo !== undefined) patch.yolo = agent.yolo;
-        const paths = raw.paths || {};
-        if (paths.skills_dir) patch.skillsDir = paths.skills_dir;
-        if (paths.traces_dir) patch.tracesDir = paths.traces_dir;
-        if (paths.tasks_db) patch.tasksDb = paths.tasks_db;
-        const ui = raw.ui || {};
-        if (ui.overlay !== undefined) patch.noOverlay = !ui.overlay;
-        store.setConfig(patch as any);
-      } catch {
-        // Config file missing or unparseable — keep defaults
+      if (cfgToLoad) {
+        store.setConfigPath(cfgToLoad);
+        setLastConfig(cfgToLoad);
+        try {
+          const fullPath = resolve(projectRoot, cfgToLoad);
+          const raw = parseYaml(readFileSync(fullPath, "utf-8")) || {};
+          const patch: Record<string, unknown> = {};
+          const be = raw.backend || {};
+          const vnc = be.vnc || {};
+          patch.backend = {
+            kind: be.kind || "vnc",
+            host: vnc.host || "127.0.0.1",
+            port: vnc.port || 5900,
+            hostOs: be.host_os || "unknown",
+            passwordEnv: vnc.password_env,
+            usernameEnv: vnc.username_env,
+            maxWidth: vnc.max_width,
+            maxHeight: vnc.max_height,
+          };
+          const llm = raw.llm || {};
+          const roles = llm.roles || {};
+          patch.llmRoles = roles;
+          if (llm.aws_region) patch.llmAwsRegion = llm.aws_region;
+          if (llm.request_timeout_s) patch.llmRequestTimeoutS = llm.request_timeout_s;
+          if (llm.creative_temperature !== undefined) patch.llmCreativeTemp = llm.creative_temperature;
+          if (llm.analytical_temperature !== undefined) patch.llmAnalyticalTemp = llm.analytical_temperature;
+          const exec = raw.executor || {};
+          patch.executor = {
+            defaultScreenWidth: exec.default_screen_width || 1920,
+            defaultScreenHeight: exec.default_screen_height || 1080,
+            stepTimeoutS: exec.step_timeout_s || 60,
+          };
+          const agent = raw.agent || {};
+          if (agent.max_retries !== undefined) patch.maxRetries = agent.max_retries;
+          if (agent.explore_steps !== undefined) patch.exploreSteps = agent.explore_steps;
+          if (agent.no_strategy !== undefined) patch.noStrategy = agent.no_strategy;
+          if (agent.verbose !== undefined) patch.verbose = agent.verbose;
+          if (agent.record !== undefined) patch.record = agent.record;
+          if (agent.record_fps !== undefined) patch.recordFps = agent.record_fps;
+          if (agent.yolo !== undefined) patch.yolo = agent.yolo;
+          const paths = raw.paths || {};
+          if (paths.skills_dir) patch.skillsDir = paths.skills_dir;
+          if (paths.traces_dir) patch.tracesDir = paths.traces_dir;
+          if (paths.tasks_db) patch.tasksDb = paths.tasks_db;
+          const ui = raw.ui || {};
+          if (ui.overlay !== undefined) patch.noOverlay = !ui.overlay;
+          store.setConfig(patch as any);
+        } catch {
+          // Config file missing or unparseable — keep defaults
+        }
       }
     }
+
+    // Persist config to disk whenever it changes
+    let prevConfig = useAgentStore.getState().config;
+    let prevConfigPath = useAgentStore.getState().configPath;
+    const unsub = useAgentStore.subscribe((state) => {
+      if (state.config !== prevConfig || state.configPath !== prevConfigPath) {
+        prevConfig = state.config;
+        prevConfigPath = state.configPath;
+        persistConfig(state.config, state.configPath);
+      }
+    });
+
     if (goal && !connected && !storeGoal) {
       startRun(goal);
     }
@@ -140,12 +163,14 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
         const tracesDir = resolve(projectRoot, store.config.tracesDir || "./traces");
         const traceDir = resolveTraceDir(tracesDir, tracePath);
         const { meta, goal: traceGoal } = loadTrace(traceDir);
-        store.setGoal(traceGoal || meta.task_name || `[Replay] ${meta.task_id}`);
+        store.setGoal(traceGoal || meta.task_name || `[Replay] ${meta.run_id || meta.task_id || "unknown"}`);
         setIsReplay(true);
       } catch (err: any) {
         store.setError(`Failed to load trace: ${err.message}`);
       }
     }
+
+    return unsub;
   }, [goal, connected, storeGoal, startRun, configPath, projectRoot, tracePath]);
 
   useInput((input, key) => {
@@ -177,6 +202,29 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
         } else if (trimmed.startsWith("/plan ")) {
           const g = trimmed.slice("/plan ".length).trim();
           if (g) startRun(g, "plan");
+        } else if (trimmed === "/test") {
+          startRun("", "test");
+        } else if (inputMode === "test" && !trimmed.startsWith("/")) {
+          const parts = trimmed.split(/\s+(.+)/);
+          const skillId = parts[0];
+          const rawInputs = parts[1] || "{}";
+          setGoalInput("");
+          setCursorPos(0);
+          const store = useAgentStore.getState();
+          try {
+            const inputs = JSON.parse(rawInputs);
+            store.pushChat({ id: `test-${Date.now()}`, kind: "status", ts: new Date().toISOString(), text: `▶ ${skillId} ${JSON.stringify(inputs)}` });
+            manager.executeSkill(skillId, inputs).then((res) => {
+              const s = useAgentStore.getState();
+              if (res.success) {
+                s.pushChat({ id: `test-res-${Date.now()}`, kind: "status", ts: new Date().toISOString(), text: `✓ ${JSON.stringify(res.outputs, null, 2)}` });
+              } else {
+                s.pushChat({ id: `test-err-${Date.now()}`, kind: "error", ts: new Date().toISOString(), text: `✗ ${res.error}` });
+              }
+            });
+          } catch (e: any) {
+            store.pushChat({ id: `test-err-${Date.now()}`, kind: "error", ts: new Date().toISOString(), text: `✗ Invalid JSON: ${e.message}` });
+          }
         } else if (trimmed.startsWith("/")) {
           setGoalInput("");
           setCursorPos(0);
@@ -239,7 +287,7 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
       try {
         const traceDir = resolveTraceDir(tracesDir, taskId);
         const { meta, goal: traceGoal } = loadTrace(traceDir);
-        store.setGoal(traceGoal || meta.task_name || `[Replay] ${meta.task_id}`);
+        store.setGoal(traceGoal || meta.task_name || `[Replay] ${meta.run_id || meta.task_id || "unknown"}`);
         setIsReplay(true);
         setShowTraces(false);
       } catch (err: any) {
@@ -285,7 +333,7 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
 
       <Box flexDirection="column" flexGrow={1} overflow="hidden" paddingX={1}>
         {/* Show logo + goal prompt when idle */}
-        {inputActive && (
+        {inputActive && inputMode === "goal" && (
           <Box flexDirection="column" marginTop={1}>
             <Text color="cyan" bold>
               {LOGO}
@@ -303,14 +351,35 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
             </Box>
             <Box marginTop={1}>
               <Text dimColor>
-                /learn &lt;goal&gt;  /explore &lt;goal&gt;  /plan &lt;goal&gt;  •  /config  /traces  /help  /quit  •  ↑↓: history
+                /learn &lt;goal&gt;  /explore &lt;goal&gt;  /plan &lt;goal&gt;  /test  •  /config  /traces  /help  /quit  •  ↑↓: history
+              </Text>
+            </Box>
+          </Box>
+        )}
+
+        {/* Test mode — chat feed + skill input */}
+        {inputMode === "test" && (
+          <Box flexDirection="column" flexGrow={1}>
+            <GoalDisplay goal="[test mode] interactive skill REPL" isReplay={false} />
+            <ChatFeed />
+            <Box marginTop={1}>
+              <Text>
+                <Text color="magenta" bold>{"skill❯ "}</Text>
+                <Text>{goalInput.slice(0, cursorPos)}</Text>
+                <Text color="cyan">█</Text>
+                <Text>{goalInput.slice(cursorPos)}</Text>
+              </Text>
+            </Box>
+            <Box>
+              <Text dimColor>
+                Format: skill_id {"{\"key\": \"value\"}"}  •  /quit to exit
               </Text>
             </Box>
           </Box>
         )}
 
         {/* Active run — chat-style feed */}
-        {storeGoal && (
+        {storeGoal && inputMode !== "test" && (
           <Box flexDirection="column" flexGrow={1}>
             <GoalDisplay goal={storeGoal} isReplay={isReplay} />
             {!pendingConfirm && <ChatFeed />}

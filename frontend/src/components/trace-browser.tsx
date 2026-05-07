@@ -27,7 +27,7 @@ export function TraceBrowser({ tracesDir, onSelect, onExit }: TraceBrowserProps)
     } else if (key.downArrow) {
       setSelected((s) => Math.min(traces.length - 1, s + 1));
     } else if (key.return && traces.length > 0) {
-      onSelect(traces[selected].task_id);
+      onSelect(traces[selected].run_id || traces[selected].task_id || "");
     }
   });
 
@@ -76,14 +76,14 @@ export function TraceBrowser({ tracesDir, onSelect, onExit }: TraceBrowserProps)
         const statusIcon = trace.status === "success" ? "✓" : trace.status === "failed" ? "✗" : "○";
 
         return (
-          <Box key={trace.task_id}>
+          <Box key={trace.run_id || trace.task_id || String(globalIdx)}>
             <Text color={isSelected ? "cyan" : undefined}>
               {isSelected ? "❯ " : "  "}
             </Text>
             <Text color={statusColor}>{statusIcon} </Text>
             <Text dimColor>{dateStr} {timeStr} </Text>
-            <Text bold={isSelected}>{trace.task_name || trace.task_id}</Text>
-            <Text dimColor>{" "}({durationStr}, {trace.events} events)</Text>
+            <Text bold={isSelected}>{trace.goal || trace.task_name || trace.run_id || trace.task_id}</Text>
+            <Text dimColor>{" "}({durationStr}{trace.events != null ? `, ${trace.events} events` : ""})</Text>
           </Box>
         );
       })}

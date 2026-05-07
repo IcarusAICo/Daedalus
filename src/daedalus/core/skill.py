@@ -1,10 +1,12 @@
 """Skill base classes.
 
-A skill is a typed unit of work the executor can call. There are two kinds:
+A skill is a typed unit of work the executor can call. There are three kinds:
 
 - :class:`AtomicSkill` runs once with validated inputs and returns validated outputs.
 - :class:`DaemonSkill` runs a long-lived async loop that publishes updates to
   the per-task ``TaskState`` until cancelled.
+- :class:`ServiceSkill` has an expensive startup phase (e.g. loading ML model
+  weights), stays warm for many ``query()`` calls, then releases on ``stop()``.
 
 Subclasses MUST declare ``Inputs`` and ``Outputs`` (Pydantic models) and provide
 a ``SPEC`` :class:`SkillSpec` instance describing the skill metadata. The
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
 class SkillKind(enum.StrEnum):
     ATOMIC = "atomic"
     DAEMON = "daemon"
+    SERVICE = "service"
 
 
 class Skill(ABC):
@@ -96,3 +99,47 @@ class DaemonSkill(Skill):
         ``ctx.aborted()`` and clean up on cancellation."""
         if False:  # pragma: no cover - keeps signature an async generator
             yield  # type: ignore[unreachable]
+
+
+class ServiceSkill(Skill):
+    """A skill with an expensive startup phase (e.g. loading a ML model).
+
+    The lifecycle is:
+        1. ``start()`` — load resources into memory (model weights, etc.)
+        2. ``query()`` — process one or more inputs against the loaded service
+        3. ``stop()`` — release resources
+
+    Between ``start()`` and ``stop()`` the service stays warm and can handle
+    many ``query()`` calls efficiently. The executor manages the lifecycle.
+
+    Subclasses MUST declare a ``QueryInputs`` class variable (Pydantic model)
+    describing the per-query inputs, in addition to the usual ``Inputs`` (used
+    by ``start``) and ``Outputs`` (the query response type).
+    """
+
+    KIND: ClassVar[SkillKind] = SkillKind.SERVICE
+    QueryInputs: ClassVar[type[BaseModel]]
+
+    @abstractmethod
+    def start(self, inputs: BaseModel, ctx: "ExecutionContext") -> None:
+        """Load the service (model weights, connections, etc.) into memory."""
+
+    @abstractmethod
+    def query(self, inputs: BaseModel, ctx: "ExecutionContext") -> BaseModel:
+        """Process a query against the running service. Returns ``self.Outputs``."""
+
+    @abstractmethod
+    def stop(self, ctx: "ExecutionContext") -> None:
+        """Release resources held by the service."""
+
+    @classmethod
+    def validate_class(cls) -> None:
+        super().validate_class()
+        if not hasattr(cls, "QueryInputs"):
+            raise TypeError(
+                f"{cls.__name__} is missing required class attribute 'QueryInputs'"
+            )
+        if not (isinstance(cls.QueryInputs, type) and issubclass(cls.QueryInputs, BaseModel)):
+            raise TypeError(
+                f"{cls.__name__}.QueryInputs must be a Pydantic BaseModel subclass"
+            )

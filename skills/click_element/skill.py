@@ -92,15 +92,12 @@ class ClickElement(AtomicSkill):
 
         shot = ctx.backend.screenshot()
 
-        # Downscale to LLM resolution so grounding returns coords in LLM space
+        # Send full-resolution image to grounding for best accuracy,
+        # but request coordinates in the LLM's reference frame.
         llm_w, llm_h = llm_image_size(shot.width, shot.height)
-        img = shot.image
-        if (llm_w, llm_h) != (shot.width, shot.height):
-            from PIL import Image as _Image
-            img = img.resize((llm_w, llm_h), _Image.LANCZOS)
 
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="PNG")
+        shot.image.convert("RGB").save(buf, format="PNG")
         image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
         grounding_cfg = (ctx.config or {}).get("grounding", {})
@@ -110,12 +107,14 @@ class ClickElement(AtomicSkill):
         x, y, confidence, label = self._locate(
             inputs, ctx, endpoint, timeout_s, image_b64,
             llm_w, llm_h,
+            target_width=llm_w,
+            target_height=llm_h,
         )
 
         if x is None or y is None:
             return ClickElementOutput(found=False, clicked=False, label=label)
 
-        # Scale coordinates back up to actual backend resolution
+        # Scale coordinates from LLM space back to actual backend resolution
         scale = ctx.coordinate_scale
         click_x = int(x * scale)
         click_y = int(y * scale)
@@ -140,17 +139,25 @@ class ClickElement(AtomicSkill):
         image_b64: str,
         screen_w: int,
         screen_h: int,
+        target_width: int | None = None,
+        target_height: int | None = None,
     ) -> tuple[int | None, int | None, float, str]:
         """Returns (x, y, confidence, label). x/y are None if not found."""
         try:
+            payload: dict = {
+                "image_b64": image_b64,
+                "description": inputs.description,
+                "mode": "point",
+                "confidence_threshold": inputs.confidence_threshold,
+            }
+            if target_width is not None:
+                payload["target_width"] = target_width
+            if target_height is not None:
+                payload["target_height"] = target_height
+
             resp = requests.post(
                 f"{endpoint}/locate",
-                json={
-                    "image_b64": image_b64,
-                    "description": inputs.description,
-                    "mode": "point",
-                    "confidence_threshold": inputs.confidence_threshold,
-                },
+                json=payload,
                 timeout=timeout_s,
             )
             resp.raise_for_status()

@@ -54,6 +54,7 @@ async def health() -> dict:
     return {
         "status": "ok",
         "models_loaded": engine.is_loaded,
+        "kvground_loaded": engine._kvground_loaded,
         "zonui_loaded": engine._zonui_loaded,
         "omniparser_loaded": engine._loaded,
     }
@@ -78,6 +79,8 @@ async def locate(req: LocateRequest) -> LocateResponse:
             req.description,
             mode=req.mode,
             confidence_threshold=req.confidence_threshold,
+            target_width=req.target_width,
+            target_height=req.target_height,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Locate failed: {exc}") from exc

@@ -1,11 +1,13 @@
 """Model loading and inference for the grounding service.
 
 Uses a two-tier approach:
-  1. ZonUI-3B (primary): A purpose-built GUI grounding VLM that takes a
-     screenshot + text description and directly outputs click coordinates.
-     Much more accurate for element location than detect-then-match.
+  1. KV-Ground-4B (primary): A Qwen3-VL-based GUI grounding VLM fine-tuned
+     for high-resolution screenshots. Faster and more accurate than ZonUI-3B.
   2. OmniParser V2 (fallback/parse): YOLO icon detection + Florence-2
      captioning for full-screen element enumeration via /parse.
+
+Legacy ZonUI-3B code is preserved but disabled (set GROUNDING_USE_ZONUI=1 to
+use it instead of KV-Ground-4B).
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import ast
 import base64
 import io
 import logging
+import os
 import time
 from difflib import SequenceMatcher
 from typing import Any
@@ -34,6 +37,8 @@ def _decode_image(image_b64: str) -> Image.Image:
 class GroundingEngine:
     """Manages model lifecycle and inference."""
 
+    KVGROUND_MODEL_ID = "vocaela/KV-Ground-8B-BaseGuiOwl1.5-0315"
+
     def __init__(self) -> None:
         self._yolo: Any = None
         self._caption_model: Any = None
@@ -41,9 +46,12 @@ class GroundingEngine:
         self._zonui_model: Any = None
         self._zonui_processor: Any = None
         self._zonui_tokenizer: Any = None
+        self._kvground_model: Any = None
+        self._kvground_processor: Any = None
         self._device: str = "cpu"
         self._loaded = False
         self._zonui_loaded = False
+        self._kvground_loaded = False
 
     def load(self, device: str = "cuda") -> None:
         import torch
@@ -53,7 +61,64 @@ class GroundingEngine:
             device = "cpu"
         self._device = device
 
-        # Load ZonUI-3B (primary grounding model)
+        use_zonui = os.environ.get("GROUNDING_USE_ZONUI", "0") == "1"
+
+        if use_zonui:
+            self._load_zonui(device)
+        else:
+            self._load_kvground(device)
+
+        # Load OmniParser V2 (YOLO + Florence-2 for /parse and fallback)
+        try:
+            from ultralytics import YOLO
+            from transformers import AutoModelForCausalLM, AutoProcessor
+
+            log.info("loading YOLO icon detector...")
+            self._yolo = YOLO("weights/icon_detect/model.pt")
+
+            log.info("loading Florence-2 caption model on %s...", device)
+            self._caption_processor = AutoProcessor.from_pretrained(
+                "microsoft/Florence-2-base", trust_remote_code=True,
+            )
+            self._caption_model = AutoModelForCausalLM.from_pretrained(
+                "weights/icon_caption_florence",
+                torch_dtype=torch.float16,
+                trust_remote_code=True,
+            ).to(device)
+
+            self._loaded = True
+            log.info("OmniParser models loaded successfully")
+        except Exception as exc:
+            log.warning("failed to load OmniParser models: %s", exc)
+            self._loaded = False
+
+    def _load_kvground(self, device: str) -> None:
+        """Load KV-Ground-4B-BaseGuiOwl1.5-0228 (Qwen3-VL architecture)."""
+        import torch
+
+        try:
+            from transformers import AutoProcessor, AutoModelForImageTextToText
+
+            log.info("loading KV-Ground-4B grounding model on %s...", device)
+            self._kvground_model = AutoModelForImageTextToText.from_pretrained(
+                self.KVGROUND_MODEL_ID,
+                dtype=torch.bfloat16,
+                device_map="auto" if device == "cuda" else None,
+            ).eval()
+            self._kvground_processor = AutoProcessor.from_pretrained(
+                self.KVGROUND_MODEL_ID,
+            )
+            self._kvground_loaded = True
+            log.info("KV-Ground-4B loaded successfully")
+        except Exception as exc:
+            log.warning("failed to load KV-Ground-4B: %s — falling back to ZonUI-3B", exc)
+            self._kvground_loaded = False
+            self._load_zonui(device)
+
+    def _load_zonui(self, device: str) -> None:
+        """Load ZonUI-3B (legacy, Qwen2.5-VL architecture)."""
+        import torch
+
         try:
             from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
             from transformers.generation import GenerationConfig
@@ -81,33 +146,9 @@ class GroundingEngine:
             log.warning("failed to load ZonUI-3B: %s — will use OmniParser only", exc)
             self._zonui_loaded = False
 
-        # Load OmniParser V2 (YOLO + Florence-2 for /parse and fallback)
-        try:
-            from ultralytics import YOLO
-            from transformers import AutoModelForCausalLM, AutoProcessor
-
-            log.info("loading YOLO icon detector...")
-            self._yolo = YOLO("weights/icon_detect/model.pt")
-
-            log.info("loading Florence-2 caption model on %s...", device)
-            self._caption_processor = AutoProcessor.from_pretrained(
-                "microsoft/Florence-2-base", trust_remote_code=True,
-            )
-            self._caption_model = AutoModelForCausalLM.from_pretrained(
-                "weights/icon_caption_florence",
-                torch_dtype=torch.float16,
-                trust_remote_code=True,
-            ).to(device)
-
-            self._loaded = True
-            log.info("OmniParser models loaded successfully")
-        except Exception as exc:
-            log.warning("failed to load OmniParser models: %s", exc)
-            self._loaded = False
-
     @property
     def is_loaded(self) -> bool:
-        return self._loaded or self._zonui_loaded
+        return self._loaded or self._zonui_loaded or self._kvground_loaded
 
     def parse(self, image_b64: str) -> tuple[list[UIElement], float]:
         t0 = time.perf_counter()
@@ -291,6 +332,230 @@ class GroundingEngine:
 
         return ocr_texts
 
+    def _locate_with_kvground(
+        self, image_b64: str, description: str, mode: str = "point",
+        target_width: int | None = None, target_height: int | None = None,
+    ) -> tuple[list[LocateMatch], float] | None:
+        """Use KV-Ground-8B to locate an element by description.
+
+        The model outputs coordinates in the processor's internal resolution.
+        We map them to the target coordinate space:
+          - If target_width/target_height are set, output is in that space
+          - Otherwise output is in the original image's pixel space
+        Returns None if KV-Ground is not loaded or fails.
+        """
+        if not self._kvground_loaded:
+            return None
+
+        import torch
+
+        t0 = time.perf_counter()
+        img = _decode_image(image_b64)
+        orig_w, orig_h = img.size
+
+        # The output coordinate space — either the caller's target or the image itself
+        out_w = target_width if target_width else orig_w
+        out_h = target_height if target_height else orig_h
+
+        if mode == "box":
+            system_prompt = (
+                "Based on the screenshot of the page, I give a text description and you "
+                "give the bounding box of the described element. Return the top-left and "
+                "bottom-right coordinates as [[x1, y1], [x2, y2]]."
+            )
+        else:
+            system_prompt = (
+                "Based on the screenshot of the page, I give a text description and you "
+                "give its corresponding location. The coordinate represents a clickable "
+                "location [x, y] for an element."
+            )
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": system_prompt},
+                    {"type": "image", "image": img},
+                    {"type": "text", "text": description},
+                ],
+            }
+        ]
+
+        try:
+            text = self._kvground_processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+            inputs = self._kvground_processor(
+                text=[text], images=[img],
+                return_tensors="pt",
+            ).to(self._kvground_model.device)
+
+            # KV-Ground outputs coordinates normalized to [0, 1000] range.
+            # We don't need model_w/model_h — just divide by 1000 and multiply
+            # by the output coordinate space.
+            ip = self._kvground_processor.image_processor
+            merge_size = ip.merge_size
+            patch_size = ip.patch_size
+            image_grid_thw = inputs.get("image_grid_thw")
+            if image_grid_thw is not None and len(image_grid_thw) > 0:
+                _, grid_h, grid_w = image_grid_thw[0].tolist()
+                model_w = int(grid_w * merge_size * patch_size)
+                model_h = int(grid_h * merge_size * patch_size)
+            else:
+                model_w = orig_w
+                model_h = orig_h
+
+            with torch.inference_mode():
+                generated_ids = self._kvground_model.generate(
+                    **inputs, max_new_tokens=50, do_sample=False,
+                )
+
+            generated_ids_trimmed = [
+                out_ids[len(in_ids):]
+                for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            output_text = self._kvground_processor.batch_decode(
+                generated_ids_trimmed, skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0].strip()
+
+            log.info("KV-Ground raw output for %r (mode=%s): %s (model res: %dx%d, output space: %dx%d)",
+                     description, mode, output_text, model_w, model_h, out_w, out_h)
+
+            coordinates = ast.literal_eval(output_text)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+
+            # Model outputs in [0, 1000] normalized space
+            return self._parse_grounding_coordinates(
+                coordinates, output_text, out_w, out_h, description, mode, elapsed_ms,
+                model_w=1000, model_h=1000,
+            )
+
+        except Exception as exc:
+            log.warning("KV-Ground locate failed for %r: %s", description, exc)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            return None
+
+    def _parse_grounding_coordinates(
+        self,
+        coordinates: Any,
+        raw_output: str,
+        orig_w: int,
+        orig_h: int,
+        description: str,
+        mode: str,
+        elapsed_ms: float,
+        model_w: int | None = None,
+        model_h: int | None = None,
+    ) -> tuple[list[LocateMatch], float] | None:
+        """Parse coordinate output from a grounding model into LocateMatch results.
+
+        Coordinates from the model are in the model's internal resolution
+        (model_w x model_h). We normalize to [0,1] then scale to original.
+
+        Handles multiple output formats:
+          - [x, y] point
+          - [x1, y1, x2, y2] flat bounding box
+          - [[x1, y1], [x2, y2]] nested bounding box
+        """
+        if not isinstance(coordinates, list) or len(coordinates) < 2:
+            log.warning("Unexpected coordinate format: %s", raw_output)
+            return None
+
+        # Scale factors: model coords -> original image coords
+        sx = orig_w / model_w if model_w else 1.0
+        sy = orig_h / model_h if model_h else 1.0
+
+        if mode == "box":
+            return self._parse_box_coordinates(
+                coordinates, raw_output, orig_w, orig_h, description, elapsed_ms, sx, sy,
+            )
+
+        # Point mode — but model may return a bbox anyway
+        if len(coordinates) == 2 and not isinstance(coordinates[0], list):
+            abs_x = max(0, min(int(coordinates[0] * sx), orig_w - 1))
+            abs_y = max(0, min(int(coordinates[1] * sy), orig_h - 1))
+            match = LocateMatch(
+                label=description, x=abs_x, y=abs_y,
+                box=None, confidence=0.9,
+            )
+            return [match], elapsed_ms
+
+        if len(coordinates) == 4 and not isinstance(coordinates[0], list):
+            # Model returned [x1, y1, x2, y2] in point mode — take center
+            x1 = max(0, min(int(coordinates[0] * sx), orig_w - 1))
+            y1 = max(0, min(int(coordinates[1] * sy), orig_h - 1))
+            x2 = max(0, min(int(coordinates[2] * sx), orig_w - 1))
+            y2 = max(0, min(int(coordinates[3] * sy), orig_h - 1))
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
+            match = LocateMatch(
+                label=description, x=cx, y=cy,
+                box=(x1, y1, x2, y2), confidence=0.9,
+            )
+            return [match], elapsed_ms
+
+        if (len(coordinates) == 2 and isinstance(coordinates[0], list)):
+            # [[x1,y1],[x2,y2]] in point mode — take center
+            x1 = max(0, min(int(coordinates[0][0] * sx), orig_w - 1))
+            y1 = max(0, min(int(coordinates[0][1] * sy), orig_h - 1))
+            x2 = max(0, min(int(coordinates[1][0] * sx), orig_w - 1))
+            y2 = max(0, min(int(coordinates[1][1] * sy), orig_h - 1))
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
+            match = LocateMatch(
+                label=description, x=cx, y=cy,
+                box=(x1, y1, x2, y2), confidence=0.9,
+            )
+            return [match], elapsed_ms
+
+        log.warning("Unexpected point format: %s", raw_output)
+        return None
+
+    def _parse_box_coordinates(
+        self,
+        coordinates: list,
+        raw_output: str,
+        orig_w: int,
+        orig_h: int,
+        description: str,
+        elapsed_ms: float,
+        sx: float = 1.0,
+        sy: float = 1.0,
+    ) -> tuple[list[LocateMatch], float] | None:
+        """Parse box-mode coordinate output."""
+        if len(coordinates) == 2 and isinstance(coordinates[0], list):
+            # [[x1,y1],[x2,y2]]
+            rx1, ry1 = coordinates[0]
+            rx2, ry2 = coordinates[1]
+        elif len(coordinates) == 4 and not isinstance(coordinates[0], list):
+            rx1, ry1, rx2, ry2 = coordinates
+        elif len(coordinates) == 2 and not isinstance(coordinates[0], list):
+            # Only a point returned in box mode
+            abs_x = max(0, min(int(coordinates[0] * sx), orig_w - 1))
+            abs_y = max(0, min(int(coordinates[1] * sy), orig_h - 1))
+            match = LocateMatch(
+                label=description, x=abs_x, y=abs_y,
+                box=None, confidence=0.7,
+            )
+            return [match], elapsed_ms
+        else:
+            log.warning("Unexpected box format: %s", raw_output)
+            return None
+
+        x1 = max(0, min(int(rx1 * sx), orig_w - 1))
+        y1 = max(0, min(int(ry1 * sy), orig_h - 1))
+        x2 = max(0, min(int(rx2 * sx), orig_w - 1))
+        y2 = max(0, min(int(ry2 * sy), orig_h - 1))
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+
+        match = LocateMatch(
+            label=description, x=cx, y=cy,
+            box=(x1, y1, x2, y2), confidence=0.85,
+        )
+        return [match], elapsed_ms
+
     def _locate_with_zonui(
         self, image_b64: str, description: str, mode: str = "point",
     ) -> tuple[list[LocateMatch], float] | None:
@@ -467,11 +732,23 @@ class GroundingEngine:
         description: str,
         mode: str = "point",
         confidence_threshold: float = 0.3,
+        target_width: int | None = None,
+        target_height: int | None = None,
     ) -> tuple[list[LocateMatch], float]:
         if mode == "box":
-            return self._locate_box(image_b64, description, confidence_threshold)
+            return self._locate_box(image_b64, description, confidence_threshold,
+                                    target_width, target_height)
 
-        # Point/all mode: ZonUI first, OmniParser fallback
+        # Point/all mode: KV-Ground first, ZonUI second, OmniParser fallback
+        kvground_result = self._locate_with_kvground(
+            image_b64, description, mode="point",
+            target_width=target_width, target_height=target_height,
+        )
+        if kvground_result is not None:
+            matches, elapsed_ms = kvground_result
+            if matches:
+                return matches, elapsed_ms
+
         zonui_result = self._locate_with_zonui(image_b64, description, mode="point")
         if zonui_result is not None:
             matches, elapsed_ms = zonui_result
@@ -486,9 +763,21 @@ class GroundingEngine:
         image_b64: str,
         description: str,
         confidence_threshold: float = 0.3,
+        target_width: int | None = None,
+        target_height: int | None = None,
     ) -> tuple[list[LocateMatch], float]:
-        """Box mode: OmniParser first (has native bounding boxes), ZonUI fallback."""
-        # Primary: OmniParser which has native bounding boxes
+        """Box mode: KV-Ground first, then OmniParser, then ZonUI."""
+        # Primary: KV-Ground-4B
+        kvground_result = self._locate_with_kvground(
+            image_b64, description, mode="box",
+            target_width=target_width, target_height=target_height,
+        )
+        if kvground_result is not None:
+            matches, elapsed_ms = kvground_result
+            if matches:
+                return matches, elapsed_ms
+
+        # Secondary: OmniParser which has native bounding boxes
         if self._loaded:
             matches, elapsed_ms = self._locate_with_omniparser(
                 image_b64, description, confidence_threshold, prefer_largest=True,
@@ -496,7 +785,7 @@ class GroundingEngine:
             if matches:
                 return matches, elapsed_ms
 
-        # Fallback: ZonUI asked for bounding box coordinates
+        # Tertiary: ZonUI asked for bounding box coordinates
         zonui_result = self._locate_with_zonui(image_b64, description, mode="box")
         if zonui_result is not None:
             matches, elapsed_ms = zonui_result

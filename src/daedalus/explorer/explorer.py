@@ -134,6 +134,29 @@ _TOOL_EXPLORE_DONE = {
     },
 }
 
+_TOOL_REGISTER_SKILL = {
+    "type": "function",
+    "function": {
+        "name": "register_skill",
+        "description": (
+            "Promote a temp skill to the permanent skills library. Call this "
+            "after you have tested the skill and confirmed it works correctly "
+            "in the live environment. Only skills created via implement_skill "
+            "in this session can be registered."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill_name": {
+                    "type": "string",
+                    "description": "The skill_id to promote (must be a temp skill from this session).",
+                },
+            },
+            "required": ["skill_name"],
+        },
+    },
+}
+
 
 def _skill_to_tool_def(entry) -> dict[str, Any]:
     """Convert a registered skill into an OpenAI function-calling tool definition."""
@@ -317,6 +340,7 @@ class Explorer:
         self._tasks_db = tasks_db or self._traces_root / "tasks.db"
         self._max_iterations = max_iterations
         self._verbose = verbose
+        self._temp_skills: list[str] = []
 
     def _build_tools(self) -> list[dict[str, Any]]:
         """Build the full tool list: all registered skills + special tools."""
@@ -326,6 +350,7 @@ class Explorer:
                 continue
             tools.append(_skill_to_tool_def(entry))
         tools.append(_TOOL_IMPLEMENT_SKILL)
+        tools.append(_TOOL_REGISTER_SKILL)
         tools.append(_TOOL_EXPLORE_DONE)
         return tools
 
@@ -352,7 +377,11 @@ class Explorer:
         rather than just gathering information for a downstream planner.
         """
         abort = abort_event or threading.Event()
-        task_id = f"explore-{uuid.uuid4().hex[:8]}"
+        task_id = "explorer"
+
+        # Clean up stale temp skills from previous sessions.
+        self._implementor.cleanup_temp()
+        self._temp_skills.clear()
 
         self._traces_root.mkdir(parents=True, exist_ok=True)
         self._tasks_db.parent.mkdir(parents=True, exist_ok=True)
@@ -361,6 +390,7 @@ class Explorer:
             traces_root=self._traces_root,
             db_path=self._tasks_db,
             task_name="explore",
+            task_id="explorer",
         )
         self._gateway.set_tracer(tracer)
         state = TaskState(self._tasks_db, task_id)
@@ -397,7 +427,8 @@ class Explorer:
         total_tool_calls = 0
         observations: str | None = None
 
-        for iteration in range(self._max_iterations):
+        iteration = 0
+        while iteration < self._max_iterations:
             if abort.is_set():
                 log.warning("explorer aborted by user")
                 break
@@ -447,6 +478,10 @@ class Explorer:
             ]
             messages.append(assistant_msg)
 
+            # Only count this iteration if there are non-wait tool calls
+            has_non_wait = any(tc.name != "wait" for tc in response.tool_calls)
+
+            done_flag = False
             for tc in response.tool_calls:
                 total_tool_calls += 1
 
@@ -515,12 +550,17 @@ class Explorer:
                     if self._verbose:
                         log.info("explorer called explore_done")
                     tools = self._build_tools()
+                    done_flag = True
                     break
-            else:
-                if new_skills:
-                    tools = self._build_tools()
-                continue
-            break  # explore_done was called
+
+            if done_flag:
+                break
+
+            if new_skills:
+                tools = self._build_tools()
+
+            if has_non_wait:
+                iteration += 1
 
         tracer.finish("success" if observations else "incomplete")
 
@@ -612,6 +652,9 @@ class Explorer:
                 return self._handle_explore_done(tc.arguments), True
             elif tc.name == "implement_skill":
                 result = self._handle_implement_skill(tc.arguments, new_skills)
+                return result, False
+            elif tc.name == "register_skill":
+                result = self._handle_register_skill(tc.arguments)
                 return result, False
             else:
                 # All other tool names are skill IDs.
@@ -715,8 +758,9 @@ class Explorer:
 
         if result.ok and result.bundle is not None:
             try:
-                self._implementor.publish(result.bundle)
+                self._implementor.publish_temp(result.bundle)
                 self._librarian.reindex()
+                self._temp_skills.append(skill_name)
                 new_skills.append(skill_name)
 
                 entry = self._registry.get(skill_name)
@@ -725,8 +769,10 @@ class Explorer:
                     "skill_id": skill_name,
                     "inputs": entry.cls.Inputs.model_json_schema(),
                     "outputs": entry.cls.Outputs.model_json_schema(),
+                    "note": "Skill is available for testing. Call register_skill to promote it permanently.",
                 })
             except Exception as exc:
+                self._implementor.cleanup_temp(skill_name)
                 return json.dumps({"status": "failed", "error": f"Publish error: {exc}"})
         else:
             errors = result.test_failures + [str(v) for v in result.violations]
@@ -735,3 +781,26 @@ class Explorer:
                 "errors": errors,
                 "notes": result.notes,
             })
+
+    def _handle_register_skill(self, args: dict[str, Any]) -> str:
+        skill_name = args.get("skill_name", "")
+        if not skill_name:
+            return json.dumps({"error": "skill_name is required"})
+
+        if skill_name not in self._temp_skills:
+            return json.dumps({
+                "error": f"{skill_name!r} is not a temp skill from this session. "
+                f"Available temp skills: {self._temp_skills}"
+            })
+
+        try:
+            self._implementor.promote_temp(skill_name)
+            self._librarian.reindex()
+            self._temp_skills.remove(skill_name)
+            return json.dumps({
+                "status": "registered",
+                "skill_id": skill_name,
+                "note": "Skill permanently saved to the skills library.",
+            })
+        except Exception as exc:
+            return json.dumps({"status": "failed", "error": str(exc)})

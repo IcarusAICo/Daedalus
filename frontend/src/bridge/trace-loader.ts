@@ -4,14 +4,18 @@ import { useAgentStore } from "../store/agent-store.js";
 import { applyNotification } from "./apply-event.js";
 
 export interface TraceMeta {
-  task_id: string;
-  task_name: string;
-  program_ref: string | null;
+  task_id?: string;
+  run_id?: string;
+  task_name?: string;
+  goal?: string | null;
+  mode?: string;
+  program_ref?: string | null;
   status: string;
   started: string;
-  finished: string;
-  events: number;
-  screenshots: number;
+  finished?: string | null;
+  events?: number;
+  screenshots?: number;
+  attempts?: number;
 }
 
 export function loadTrace(tracePath: string): { meta: TraceMeta; goal: string | null } {
@@ -37,12 +41,22 @@ export function loadTrace(tracePath: string): { meta: TraceMeta; goal: string | 
   const content = readFileSync(bridgeEventsPath, "utf-8");
   const lines = content.trim().split("\n").filter(Boolean);
 
-  // Detect goal from plan.yaml or first event data
-  let goal: string | null = meta.task_name || null;
-  const planPath = join(tracePath, "plan.yaml");
-  if (existsSync(planPath)) {
+  // Detect goal from goal.txt, plan/plan.yaml, or meta
+  let goal: string | null = meta.goal || meta.task_name || null;
+  const goalTxtPath = join(tracePath, "goal.txt");
+  if (!goal && existsSync(goalTxtPath)) {
     try {
-      const planContent = readFileSync(planPath, "utf-8");
+      goal = readFileSync(goalTxtPath, "utf-8").trim();
+    } catch {
+      // ignore
+    }
+  }
+  const planPath = join(tracePath, "plan", "plan.yaml");
+  const legacyPlanPath = join(tracePath, "plan.yaml");
+  const actualPlanPath = existsSync(planPath) ? planPath : existsSync(legacyPlanPath) ? legacyPlanPath : null;
+  if (!goal && actualPlanPath) {
+    try {
+      const planContent = readFileSync(actualPlanPath, "utf-8");
       const goalMatch = planContent.match(/goal:\s*(.+)/);
       if (goalMatch) goal = goalMatch[1].trim();
     } catch {

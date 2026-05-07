@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Box, Text, useInput, useStdout } from "ink";
 import Spinner from "ink-spinner";
 import type { ChatMessage } from "../store/types.js";
@@ -11,16 +11,63 @@ export function ChatFeed(): React.ReactElement {
   const { stdout } = useStdout();
   const terminalHeight = stdout?.rows ?? 40;
   const viewportHeight = Math.max(5, terminalHeight - 8);
+  const maxVisible = viewportHeight * 3;
 
   const [selectedIdx, setSelectedIdx] = useState(-1);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const [pinToBottom, setPinToBottom] = useState(true);
+  const prevCountRef = useRef(chatMessages.length);
+
+  // Auto-scroll to bottom when new messages arrive (if pinned)
+  useEffect(() => {
+    if (chatMessages.length > prevCountRef.current && pinToBottom) {
+      setScrollOffset(0);
+    }
+    prevCountRef.current = chatMessages.length;
+  }, [chatMessages.length, pinToBottom]);
 
   useInput((input, key) => {
     if (pendingConfirm) return;
 
+    // Page-Up: scroll back through history
+    if (key.pageUp || (key.upArrow && key.shift)) {
+      const maxOffset = Math.max(0, chatMessages.length - maxVisible);
+      setScrollOffset((prev) => {
+        const next = Math.min(prev + viewportHeight, maxOffset);
+        if (next > 0) setPinToBottom(false);
+        return next;
+      });
+      return;
+    }
+
+    // Page-Down: scroll forward toward latest
+    if (key.pageDown || (key.downArrow && key.shift)) {
+      setScrollOffset((prev) => {
+        const next = Math.max(0, prev - viewportHeight);
+        if (next === 0) setPinToBottom(true);
+        return next;
+      });
+      return;
+    }
+
+    // 'g' or Home: jump to beginning
+    if (input === "g" && !key.shift) {
+      const maxOffset = Math.max(0, chatMessages.length - maxVisible);
+      setScrollOffset(maxOffset);
+      setPinToBottom(false);
+      return;
+    }
+
+    // 'G' or End: jump to end
+    if (input === "G" || key.end) {
+      setScrollOffset(0);
+      setPinToBottom(true);
+      return;
+    }
+
     if (key.upArrow) {
       if (selectedIdx < 0) {
-        // Start from the last expandable item
         const expandableIndices = chatMessages
           .map((m, i) => (m.kind === "tool_call" ? i : -1))
           .filter((i) => i >= 0);
@@ -33,7 +80,23 @@ export function ChatFeed(): React.ReactElement {
           .filter((i) => i >= 0);
         const curPos = expandableIndices.indexOf(selectedIdx);
         if (curPos > 0) {
-          setSelectedIdx(expandableIndices[curPos - 1]);
+          const nextIdx = expandableIndices[curPos - 1];
+          setSelectedIdx(nextIdx);
+          // Scroll up if selected item is above the visible window
+          const currentEnd = chatMessages.length - scrollOffset;
+          const currentStart = Math.max(0, currentEnd - maxVisible);
+          if (nextIdx < currentStart) {
+            setScrollOffset(chatMessages.length - nextIdx - maxVisible);
+            setPinToBottom(false);
+          }
+        } else {
+          // Already at the top expandable item — scroll up if there's more
+          const maxOffset = Math.max(0, chatMessages.length - maxVisible);
+          setScrollOffset((prev) => {
+            const next = Math.min(prev + viewportHeight, maxOffset);
+            if (next > 0) setPinToBottom(false);
+            return next;
+          });
         }
       }
     } else if (key.downArrow) {
@@ -43,9 +106,30 @@ export function ChatFeed(): React.ReactElement {
           .filter((i) => i >= 0);
         const curPos = expandableIndices.indexOf(selectedIdx);
         if (curPos < expandableIndices.length - 1) {
-          setSelectedIdx(expandableIndices[curPos + 1]);
+          const nextIdx = expandableIndices[curPos + 1];
+          setSelectedIdx(nextIdx);
+          // Scroll down if selected item is below the visible window
+          const currentEnd = chatMessages.length - scrollOffset;
+          const currentStart = Math.max(0, currentEnd - maxVisible);
+          if (nextIdx >= currentEnd) {
+            const newOffset = Math.max(0, chatMessages.length - nextIdx - 1);
+            setScrollOffset(newOffset);
+            if (newOffset === 0) setPinToBottom(true);
+          }
         } else {
           setSelectedIdx(-1);
+          // Snap to bottom when deselecting past the last item
+          setScrollOffset(0);
+          setPinToBottom(true);
+        }
+      } else {
+        // No selection but pressing down — scroll down if not at bottom
+        if (scrollOffset > 0) {
+          setScrollOffset((prev) => {
+            const next = Math.max(0, prev - viewportHeight);
+            if (next === 0) setPinToBottom(true);
+            return next;
+          });
         }
       }
     } else if ((key.return || input === " ") && selectedIdx >= 0) {
@@ -63,15 +147,22 @@ export function ChatFeed(): React.ReactElement {
     }
   });
 
-  // Show the most recent messages that fit the viewport
-  const visible = chatMessages.slice(
-    Math.max(0, chatMessages.length - viewportHeight * 3)
-  );
+  // Compute the visible window based on scroll offset
+  const endIdx = chatMessages.length - scrollOffset;
+  const startIdx = Math.max(0, endIdx - maxVisible);
+  const visible = chatMessages.slice(startIdx, endIdx);
+  const hiddenAbove = startIdx;
+  const hiddenBelow = scrollOffset;
 
   return (
     <Box flexDirection="column" flexGrow={1} overflow="hidden">
+      {hiddenAbove > 0 && (
+        <Box>
+          <Text dimColor>  ··· {hiddenAbove} earlier event{hiddenAbove !== 1 ? "s" : ""} (PgUp/Shift+↑ to scroll, g for top)</Text>
+        </Box>
+      )}
       {visible.map((msg, i) => {
-        const globalIdx = chatMessages.length - visible.length + i;
+        const globalIdx = startIdx + i;
         return (
           <ChatMessageRow
             key={msg.id}
@@ -81,6 +172,11 @@ export function ChatFeed(): React.ReactElement {
           />
         );
       })}
+      {hiddenBelow > 0 && (
+        <Box>
+          <Text dimColor>  ··· {hiddenBelow} newer event{hiddenBelow !== 1 ? "s" : ""} (PgDn/Shift+↓ to scroll, G for bottom)</Text>
+        </Box>
+      )}
     </Box>
   );
 }
@@ -105,6 +201,12 @@ function ChatMessageRow({ msg, expanded, selected }: RowProps): React.ReactEleme
       return (
         <Box>
           <Text color="red">{"  ✗ "}{msg.text}</Text>
+        </Box>
+      );
+    case "status":
+      return (
+        <Box paddingLeft={2}>
+          <Text wrap="wrap">{msg.text}</Text>
         </Box>
       );
     default:

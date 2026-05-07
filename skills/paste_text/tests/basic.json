@@ -1,0 +1,11 @@
+{
+  "name": "basic",
+  "inputs": {
+    "text": "Hello, World!"
+  },
+  "expected_output": {
+    "success": false,
+    "text_length": 13
+  },
+  "expected_events": []
+}

@@ -106,6 +106,8 @@ CONVENTIONS
 - The spec_yaml MUST be valid YAML. Quote any string values that contain
   special YAML characters (: -> { } [ ] , # | > @ ` ! % * & ?). Use
   single or double quotes. The description field should always be quoted.
+  IMPORTANT: Tags must be strings. Always quote numeric tag values (e.g.
+  write "2048" not 2048) or YAML will parse them as integers.
 - The skill_py file MUST:
   * import: from daedalus.core import AtomicSkill, ExecutionContext, SkillSpec, register
   * import: from daedalus.core.spec import SkillVersion (and SkillExample if used)
@@ -118,6 +120,9 @@ CONVENTIONS
     will reject undeclared side effects.
 - The spec.yaml MUST agree with the SPEC inside skill.py on id/version/kind.
 - Each test fixture has shape: {"name": "...", "inputs": {...}, "expected_output": {...}, "expected_events": [...]}
+  Optional fields: "validation_mode" ("exact"|"any_valid"|"schema_only", default "exact"),
+  "valid_outputs" (list of acceptable outputs for "any_valid" mode),
+  "ignore_output_keys" (list of keys to skip in comparison).
   Tests run against an in-memory MockBackend. Keep them self-contained.
 
 ALGORITHMIC SOLVING
@@ -128,6 +133,27 @@ When implementing skills that involve puzzles, games, or deterministic problems:
 - Then act on the solution by clicking/typing
 - NEVER rely on the LLM to compute solutions — LLMs are unreliable for
   deterministic computation. Write real solvers.
+
+TEST FIXTURES FOR HEURISTIC/SEARCH ALGORITHMS
+----------------------------------------------
+When the skill uses heuristic search (expectimax, minimax, A*, etc.) or any
+algorithm where the "best" output depends on tuning weights and search depth:
+- Do NOT write fixtures that assert a specific "best" output value. The
+  algorithm may legitimately return different valid answers.
+- Instead, use "validation_mode": "any_valid" in the fixture and provide a
+  "valid_outputs" list of all acceptable results, OR use "validation_mode":
+  "schema_only" to just verify the output has the correct keys and types.
+- You can also use "ignore_output_keys": ["<key>"] to skip checking volatile fields.
+- Always include at least one fixture that checks the skill runs without error.
+
+Example fixture for a heuristic solver:
+  {"name": "basic", "inputs": {"grid": [[0,0,2,4],[0,0,0,0],[0,0,0,0],[0,0,0,0]]},
+   "expected_output": {"move": "left"},
+   "validation_mode": "any_valid",
+   "valid_outputs": [{"move": "left"}, {"move": "down"}, {"move": "right"}, {"move": "up"}]}
+
+For deterministic algorithms (sorting, exact solvers, etc.), use the default
+"exact" validation mode as normal.
 
 SKILL NAMING
 ------------
@@ -247,6 +273,8 @@ def _run_fixture_against_mock(skill_cls, fixture: dict, tmp_root: Path) -> tuple
     expected_output = fixture.get("expected_output", {})
     expected_events = fixture.get("expected_events", [])
     ignore_keys = set(fixture.get("ignore_output_keys", []))
+    validation_mode = fixture.get("validation_mode", "exact")
+    valid_outputs = fixture.get("valid_outputs", [])
 
     backend = MockBackend()
     backend.connect()
@@ -271,6 +299,22 @@ def _run_fixture_against_mock(skill_cls, fixture: dict, tmp_root: Path) -> tuple
 
     actual = {k: v for k, v in out_dict.items() if k not in ignore_keys}
     expected = {k: v for k, v in expected_output.items() if k not in ignore_keys}
+
+    if validation_mode == "any_valid":
+        if valid_outputs and actual not in valid_outputs:
+            return False, f"output {actual} not in valid_outputs"
+        return True, "ok"
+    elif validation_mode == "schema_only":
+        for key, val in expected.items():
+            if key not in actual:
+                return False, f"missing key {key!r} in output"
+            if type(actual[key]) is not type(val):
+                return False, (
+                    f"key {key!r}: expected type {type(val).__name__}, "
+                    f"got {type(actual[key]).__name__}"
+                )
+        return True, "ok"
+
     if actual != expected:
         return False, f"output {actual} != expected {expected}"
     search_start = 0
@@ -402,6 +446,47 @@ class SyntheticSkillImplementor:
         load_skill(target, registry=registry if registry is not None else get_registry())
         return bundle.skill_id
 
+    def publish_temp(self, bundle: SkillBundle, *, registry: Registry | None = None) -> Path:
+        """Publish a bundle into ``skills_dir/_temp/<id>/`` and load it into
+        the registry. Returns the path to the temp skill directory.
+
+        Unlike ``publish``, this is a staging area — the skill is usable but
+        not yet permanently registered. Call ``promote_temp`` to move it to
+        the main skills directory.
+        """
+        temp_dir = self._skills_dir / "_temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        target = temp_dir / bundle.skill_id
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(bundle.sandbox_dir, target)
+        load_skill(target, registry=registry if registry is not None else get_registry())
+        return target
+
+    def promote_temp(self, skill_id: str, *, registry: Registry | None = None) -> str:
+        """Move a skill from ``skills_dir/_temp/<id>/`` to ``skills_dir/<id>/``.
+        Returns the skill id on success."""
+        temp_path = self._skills_dir / "_temp" / skill_id
+        if not temp_path.exists():
+            raise ImplementorError(f"no temp skill {skill_id!r} to promote")
+        target = self._skills_dir / skill_id
+        if target.exists():
+            raise ImplementorError(f"skills/{skill_id}/ already exists; not overwriting")
+        shutil.move(str(temp_path), str(target))
+        return skill_id
+
+    def cleanup_temp(self, skill_id: str | None = None) -> None:
+        """Remove temp skill(s). If skill_id is None, remove the entire _temp dir."""
+        temp_dir = self._skills_dir / "_temp"
+        if not temp_dir.exists():
+            return
+        if skill_id:
+            target = temp_dir / skill_id
+            if target.exists():
+                shutil.rmtree(target)
+        else:
+            shutil.rmtree(temp_dir)
+
     # ---- Internal --------------------------------------------------------
 
     def _declared_side_effects(self, bundle: SkillBundle) -> set[str]:
@@ -467,9 +552,14 @@ class SyntheticSkillImplementor:
         # Validate spec_yaml is parseable before writing it.
         spec_text = payload["spec_yaml"]
         try:
-            yaml.safe_load(spec_text)
+            spec_data = yaml.safe_load(spec_text)
         except yaml.YAMLError as exc:
             raise ImplementorError(f"LLM produced invalid spec.yaml: {exc}") from exc
+
+        # Coerce tags to strings — YAML parses bare numbers (e.g. 2048) as int.
+        if isinstance(spec_data, dict) and "tags" in spec_data:
+            spec_data["tags"] = [str(t) for t in spec_data["tags"]]
+            spec_text = yaml.dump(spec_data, default_flow_style=False, sort_keys=False)
 
         spec_path.write_text(spec_text)
         py_path.write_text(payload["skill_py"])

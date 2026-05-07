@@ -1,0 +1,16 @@
+id: extract_text
+version: 0.1.0
+kind: service
+description: OCR service using GLM-OCR. Load the model once with start(), extract
+  text from image batches via query(), release with stop().
+side_effects:
+- llm_call
+examples:
+- inputs:
+    model_path: zai-org/GLM-OCR
+    device: auto
+tags:
+- service
+- ocr
+- vision
+- ml

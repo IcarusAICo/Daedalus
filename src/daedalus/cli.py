@@ -17,6 +17,9 @@ import logging
 import os
 import subprocess
 import sys
+import time
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -106,6 +109,17 @@ def _resolve_traces_dir(explicit: Path | None) -> Path:
     if explicit:
         return explicit.resolve()
     return (Path.cwd() / "traces").resolve()
+
+
+def _update_run_meta(run_dir: Path, **updates: Any) -> None:
+    """Update run-level meta.json with the given fields."""
+    meta_path = run_dir / "meta.json"
+    try:
+        meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        meta.update(updates)
+        meta_path.write_text(json.dumps(meta, indent=2))
+    except Exception:
+        pass
 
 
 def _resolve_db(explicit: Path | None) -> Path:
@@ -434,6 +448,177 @@ def _close_backend(be) -> None:  # type: ignore[no-untyped-def]
         be.close()
 
 
+def _run_test_mode(
+    *,
+    bridge,
+    config: Path | None,
+    backend_kind: str,
+    host: str,
+    port: int,
+    password_env: str,
+    username_env: str,
+    sk_dir: Path,
+    tr_dir: Path,
+    db_path: Path,
+    run_dir: Path,
+    console: Console,
+) -> None:
+    """Interactive skill REPL: connect to backend, wait for skill execution requests."""
+    import threading
+    from daedalus.core.store import RunStore
+
+    registry = get_registry()
+
+    # Connect to the backend
+    if backend_kind == "vnc":
+        max_res: tuple[int, int] | None = None
+        effective_username_env = username_env
+        if config and config.exists():
+            raw_cfg = yaml.safe_load(config.read_text()) or {}
+            vnc_cfg = (raw_cfg.get("backend") or {}).get("vnc") or {}
+            if not effective_username_env:
+                effective_username_env = vnc_cfg.get("username_env")
+            mr_w = vnc_cfg.get("max_width")
+            mr_h = vnc_cfg.get("max_height")
+            if mr_w and mr_h:
+                max_res = (int(mr_w), int(mr_h))
+        password = os.environ.get(password_env) if password_env else None
+        username = os.environ.get(effective_username_env) if effective_username_env else None
+        be = make_backend(
+            "vnc", host=host, port=port, password=password,
+            username=username, max_resolution=max_res,
+        )
+    else:
+        be = make_backend("mock")
+    be.connect()
+
+    # Set up an execution context
+    tracer = TraceRecorder(
+        traces_root=run_dir,
+        db_path=db_path,
+        task_name="test-session",
+        task_id="test",
+    )
+    tracer.start()
+    task_state = TaskState(db_path, tracer.task_id)
+    store = RunStore(db_path, tracer.task_id)
+    screen_w = be.size[0] if hasattr(be, "size") else 1920
+    ctx = ExecutionContext(
+        task_id=tracer.task_id,
+        backend=be,
+        task_state=task_state,
+        tracer=tracer,
+        store=store,
+        abort_event=threading.Event(),
+        coordinate_scale=compute_coordinate_scale(screen_w),
+    )
+
+    if bridge:
+        bridge.emit_phase("executor", "running", "test mode — waiting for skill commands")
+        bridge.emit_event("test_mode_ready", {
+            "skills": [e.id for e in registry],
+        })
+
+        # Register request handler for execute_skill
+        def _handle_execute_skill(params: dict) -> dict:
+            skill_id = params.get("skill_id", "")
+            inputs = params.get("inputs", {})
+
+            entry = None
+            for e in registry:
+                if e.id == skill_id:
+                    entry = e
+                    break
+            if entry is None:
+                return {"success": False, "error": f"unknown skill: {skill_id}"}
+
+            try:
+                inp = entry.cls.Inputs.model_validate(inputs)
+                instance = entry.cls()
+                out = instance.run(inp, ctx)
+                out_dict = out.model_dump(mode="json") if hasattr(out, "model_dump") else {}
+
+                # Take a screenshot after execution
+                try:
+                    png_bytes = be.screenshot()
+                    if png_bytes:
+                        tracer.attach_screenshot(png_bytes, screen_w, be.size[1] if hasattr(be, "size") else 1080)
+                except Exception:
+                    pass
+
+                return {"success": True, "outputs": out_dict}
+            except Exception as exc:
+                return {"success": False, "error": f"{type(exc).__name__}: {exc}"}
+
+        bridge.register_handler("execute_skill", _handle_execute_skill)
+
+        # Send initial screenshot
+        try:
+            png_bytes = be.screenshot()
+            if png_bytes and hasattr(bridge, "emit_event"):
+                import base64
+                bridge.emit_event("screenshot", {
+                    "width": screen_w,
+                    "height": be.size[1] if hasattr(be, "size") else 1080,
+                    "base64": base64.b64encode(png_bytes).decode(),
+                })
+        except Exception:
+            pass
+
+        # Block until the bridge is closed (frontend disconnects)
+        try:
+            bridge.wait_until_closed()
+        except (KeyboardInterrupt, EOFError):
+            pass
+    else:
+        # Non-frontend mode: simple terminal REPL
+        console.print("[bold cyan]Test mode — interactive skill REPL[/bold cyan]")
+        console.print("[dim]Available skills:[/dim]")
+        for entry in sorted(registry, key=lambda e: e.id):
+            console.print(f"  [cyan]{entry.id}[/cyan]")
+        console.print("\n[dim]Type: skill_id {{\"input_key\": \"value\"}}  or 'quit' to exit[/dim]\n")
+
+        while True:
+            try:
+                line = console.input("[green]skill>[/green] ").strip()
+            except (KeyboardInterrupt, EOFError):
+                break
+            if not line or line in ("quit", "exit", "q"):
+                break
+
+            # Parse: skill_id {json_inputs}
+            parts = line.split(None, 1)
+            skill_id = parts[0]
+            raw_inputs = parts[1] if len(parts) > 1 else "{}"
+
+            entry = None
+            for e in registry:
+                if e.id == skill_id:
+                    entry = e
+                    break
+            if entry is None:
+                console.print(f"[red]unknown skill: {skill_id}[/red]")
+                continue
+
+            try:
+                inputs = json.loads(raw_inputs)
+            except json.JSONDecodeError as exc:
+                console.print(f"[red]invalid JSON inputs: {exc}[/red]")
+                continue
+
+            try:
+                inp = entry.cls.Inputs.model_validate(inputs)
+                instance = entry.cls()
+                out = instance.run(inp, ctx)
+                out_dict = out.model_dump(mode="json") if hasattr(out, "model_dump") else {}
+                console.print(f"[green]OK:[/green] {json.dumps(out_dict, indent=2)}")
+            except Exception as exc:
+                console.print(f"[red]{type(exc).__name__}: {exc}[/red]")
+
+    tracer.finish("success")
+    _close_backend(be)
+
+
 # ---------------------------------------------------------------------------
 # `daedalus run`
 # ---------------------------------------------------------------------------
@@ -457,7 +642,7 @@ def cmd_run(
     tasks_db: Optional[Path] = typer.Option(None, "--tasks-db"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     no_strategy: bool = typer.Option(False, "--no-strategy", help="Skip the strategy phase (no proactive skill synthesis)."),
-    mode: str = typer.Option("learn", "--mode", "-m", help="Agent mode: learn (explore+plan+learn), explore (explorer solves directly), plan (skip explorer, go to planner)."),
+    mode: str = typer.Option("learn", "--mode", "-m", help="Agent mode: learn (explore+plan+learn), explore (explorer solves directly), plan (skip explorer, go to planner), test (interactive skill REPL)."),
     explore_steps: int = typer.Option(20, "--explore-steps", help="Max explorer iterations."),
     max_retries: int = typer.Option(3, "--max-retries", "-r", help="Max learner retry loops on failure."),
     learn_on_succeed: bool = typer.Option(False, "--learn-on-succeed", help="Run learner analysis even on success."),
@@ -499,13 +684,30 @@ def cmd_run(
         logging.getLogger("litellm").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
         logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("twisted").setLevel(logging.WARNING)
 
     sk_dir = _resolve_skills_dir(skills_dir)
     tr_dir = _resolve_traces_dir(traces_dir)
     db_path = _resolve_db(tasks_db)
 
+    # Create a single run directory for all artifacts of this session.
+    run_id = f"t_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    run_dir = tr_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _run_started = datetime.now(timezone.utc).isoformat()
+    _run_meta = {
+        "run_id": run_id,
+        "goal": goal,
+        "mode": mode,
+        "status": "running",
+        "started": _run_started,
+        "finished": None,
+        "attempts": 0,
+    }
+    (run_dir / "meta.json").write_text(json.dumps(_run_meta, indent=2))
+
     if bridge:
-        bridge.set_trace_dir(tr_dir)
+        bridge.set_trace_dir(run_dir)
 
     # Load agent-level defaults from config file if present
     if config and config.exists():
@@ -533,6 +735,24 @@ def cmd_run(
         set_context_config(ContextConfig.from_dict(_ctx_cfg))
 
     _ensure_library_loaded(sk_dir)
+
+    # --- Test mode: interactive skill REPL ---
+    if mode == "test":
+        _run_test_mode(
+            bridge=bridge,
+            config=config,
+            backend_kind=backend,
+            host=host,
+            port=port,
+            password_env=password_env,
+            username_env=username_env,
+            sk_dir=sk_dir,
+            tr_dir=tr_dir,
+            db_path=db_path,
+            run_dir=run_dir,
+            console=console,
+        )
+        return
 
     criteria: SuccessCriteria | None = None
 
@@ -668,7 +888,7 @@ def cmd_run(
                     librarian=librarian,
                     implementor=implementor,
                     skills_dir=sk_dir,
-                    traces_root=tr_dir,
+                    traces_root=run_dir,
                     tasks_db=db_path,
                     verbose=verbose,
                     max_iterations=explore_steps,
@@ -737,6 +957,18 @@ def cmd_run(
                 # Merge observations into memory context for the planner.
                 obs_section = "\n\n## Explorer Observations\n" + explore_result.observations
                 memory_context = (memory_context or "") + obs_section
+
+                # Save explorer output to traces directory
+                try:
+                    explorer_dir = run_dir / "explorer"
+                    explorer_dir.mkdir(parents=True, exist_ok=True)
+                    (explorer_dir / "observations.md").write_text(explore_result.observations)
+                    if explore_result.new_skills:
+                        (explorer_dir / "new_skills.txt").write_text(
+                            "\n".join(explore_result.new_skills)
+                        )
+                except Exception:
+                    pass
             except Exception as exc:
                 console.print(f"[yellow]exploration phase failed: {exc}[/yellow]")
                 if bridge:
@@ -745,6 +977,7 @@ def cmd_run(
         # In "explore" mode the explorer is the sole actor — skip planning/execution.
         if mode == "explore":
             console.print("[green]explore mode complete — task handled by explorer.[/green]")
+            _update_run_meta(run_dir, status="success", finished=datetime.now(timezone.utc).isoformat())
             if bridge:
                 bridge.emit_phase("planner", "skipped")
                 bridge.emit_phase("executor", "skipped")
@@ -788,6 +1021,18 @@ def cmd_run(
         except Exception as exc:
             console.print(f"[yellow]could not generate success criteria: {exc}[/yellow]")
             criteria = None
+
+        # Save success criteria to the run directory
+        try:
+            plan_dir = run_dir / "plan"
+            plan_dir.mkdir(parents=True, exist_ok=True)
+            if criteria is not None:
+                cr_save = criteria.model_dump(mode="json") if hasattr(criteria, "model_dump") else {}
+                (plan_dir / "success_criteria.json").write_text(json.dumps(cr_save, indent=2))
+            if goal:
+                (run_dir / "goal.txt").write_text(goal)
+        except Exception:
+            pass
 
         # Step 2: Plan (if planner reports missing skills, inform the user and re-plan).
         if bridge:
@@ -839,6 +1084,21 @@ def cmd_run(
             raise typer.Exit(1)
 
         prog = plan_result.program
+        # Save plan to the run trace directory
+        try:
+            plan_dir = run_dir / "plan"
+            plan_dir.mkdir(parents=True, exist_ok=True)
+            plan_data = prog.model_dump(mode="json", exclude_none=True)
+            if goal:
+                plan_data.setdefault("metadata", {})["goal"] = goal
+            (plan_dir / "plan.yaml").write_text(
+                yaml.dump(plan_data, default_flow_style=False, sort_keys=False)
+            )
+            code = getattr(prog, "code", None)
+            if code:
+                (plan_dir / "plan.py").write_text(code)
+        except Exception:
+            pass
         if bridge:
             prog_data = prog.model_dump(mode="json", exclude_none=True) if hasattr(prog, "model_dump") else {}
             bridge.emit_event("program_planned", {"program": prog_data})
@@ -951,6 +1211,7 @@ def cmd_run(
 
         # In frontend mode, use the bridge's abort event and status callback
         _abort_event = abort_event if frontend_mode else overlay.abort_event
+        _abort_event.clear()
         _status_cb = bridge.update_status if bridge else overlay.update_status
 
         def _exec_event_callback(kind: str, data: dict) -> None:
@@ -966,7 +1227,7 @@ def cmd_run(
             executor_obj: SequentialExecutor | PythonProgramExecutor = PythonProgramExecutor(
                 backend=be,
                 llm=skill_gateway,
-                traces_root=tr_dir,
+                traces_root=run_dir / "execution",
                 tasks_db=db_path,
                 abort_event=_abort_event,
                 status_callback=_status_cb,
@@ -976,7 +1237,7 @@ def cmd_run(
             executor_obj = SequentialExecutor(
                 backend=be,
                 llm=skill_gateway,
-                traces_root=tr_dir,
+                traces_root=run_dir / "execution",
                 tasks_db=db_path,
                 abort_event=_abort_event,
                 status_callback=_status_cb,
@@ -986,16 +1247,29 @@ def cmd_run(
         try:
             # Start screen recording if requested.
             if record:
-                rec_tmp = tr_dir / f"_recording_attempt_{attempt}.mp4"
+                rec_tmp = run_dir / "execution" / f"_recording_attempt_{attempt}.mp4"
+                rec_tmp.parent.mkdir(parents=True, exist_ok=True)
                 recorder = _ScreenRecorder(rec_tmp, backend=be, fps=record_fps, host=host, port=port)
                 recorder.start()
 
+            logging.getLogger(__name__).info(
+                "executor starting: program=%s, timeout=%.0fs, step_timeout=%.0fs, attempt=%d",
+                prog.name, executor_obj._program_timeout_s, executor_obj._step_timeout_s, attempt + 1,
+            )
             result = executor_obj.run(
                 prog,
                 program_ref=str(program) if program else "<goal>",
                 success_criteria=criteria,
+                task_id=f"attempt_{attempt}",
             )
+            logging.getLogger(__name__).info(
+                "executor finished: status=%s, steps=%d, duration=%.1fs, task_id=%s",
+                result.status, len(result.steps), result.duration_s, result.task_id,
+            )
+            if result.error_message:
+                logging.getLogger(__name__).error("executor error detail: %s", result.error_message)
         except Exception as exc:
+            logging.getLogger(__name__).exception("executor raised unexpected exception")
             console.print(f"[red]unexpected error during execution: {exc}[/red]")
             overlay.stop()
             if recorder:
@@ -1012,7 +1286,7 @@ def cmd_run(
             recording_path = recorder.stop()
             recorder = None
             if recording_path and recording_path.exists():
-                final_rec = tr_dir / result.task_id / "recording.mp4"
+                final_rec = run_dir / "execution" / result.task_id / "recording.mp4"
                 final_rec.parent.mkdir(parents=True, exist_ok=True)
                 recording_path.rename(final_rec)
                 recording_path = final_rec
@@ -1027,8 +1301,11 @@ def cmd_run(
         if bridge:
             bridge.emit_event("task_started", {"task_id": result.task_id})
             exec_status = "complete" if result.status in ("success", "goal_achieved") else "failed"
-            bridge.emit_phase("executor", exec_status, f"{result.status} in {result.duration_s:.1f}s")
-        console.print(f"trace dir: {tr_dir / result.task_id}")
+            summary = f"{result.status} in {result.duration_s:.1f}s"
+            if result.error_message:
+                summary += f" — {result.error_message}"
+            bridge.emit_phase("executor", exec_status, summary)
+        console.print(f"trace dir: {run_dir}")
         if recording_path:
             console.print(f"[dim]recording: {recording_path}[/dim]")
         _render_verdict(console, result)
@@ -1065,17 +1342,8 @@ def cmd_run(
         is_success = result.status in ("success", "goal_achieved")
         is_aborted = result.status == "aborted"
 
-        # Save the plan to the trace directory on success for replay/testing.
-        if is_success:
-            try:
-                trace_plan_path = tr_dir / result.task_id / "plan.yaml"
-                plan_data = prog.model_dump(mode="json", exclude_none=True)
-                if goal:
-                    plan_data.setdefault("metadata", {})["goal"] = goal
-                trace_plan_path.write_text(yaml.dump(plan_data, default_flow_style=False, sort_keys=False))
-                console.print(f"[dim]plan saved: {trace_plan_path}[/dim]")
-            except Exception:
-                pass
+        # Update run-level metadata
+        _update_run_meta(run_dir, status=result.status, attempts=attempt + 1)
 
         if is_aborted:
             console.print("[yellow]aborted by user[/yellow]")
@@ -1117,7 +1385,7 @@ def cmd_run(
                 try:
                     learner = Learner(gateway=gateway)
                     feedback = learner.analyze_success(
-                        tr_dir / result.task_id,
+                        run_dir / "execution" / result.task_id,
                         program=prog,
                         stream_callback=_success_learner_stream if bridge else None,
                         tool_callback=_success_tool_callback if bridge else None,
@@ -1125,6 +1393,22 @@ def cmd_run(
                         context_usage_callback=_context_usage if bridge else None,
                     )
                     console.print(f"[bold]Learner:[/bold] {feedback.summary}")
+                    # Save success learner feedback to trace directory
+                    try:
+                        fb_out = {
+                            "status": "success",
+                            "summary": feedback.summary,
+                            "suggestions": [{"category": s.category, "description": s.description, "affected_step_idx": s.affected_step_idx} for s in feedback.suggestions] if feedback.suggestions else [],
+                            "skill_amendments": [{"skill_id": a.skill_id, "issue": a.issue_description, "change": a.proposed_change} for a in feedback.skill_amendments] if hasattr(feedback, "skill_amendments") and feedback.skill_amendments else [],
+                            "new_skill_candidates": [{"proposed_id": c.proposed_id, "description": c.description} for c in feedback.new_skill_candidates] if hasattr(feedback, "new_skill_candidates") and feedback.new_skill_candidates else [],
+                        }
+                        learner_dir = run_dir / "learner"
+                        learner_dir.mkdir(parents=True, exist_ok=True)
+                        (learner_dir / "feedback_success.json").write_text(
+                            json.dumps(fb_out, indent=2)
+                        )
+                    except Exception:
+                        pass
                     if feedback.suggestions:
                         console.print("[bold cyan]Optimization suggestions:[/bold cyan]")
                         for s in feedback.suggestions:
@@ -1201,7 +1485,7 @@ def cmd_run(
         try:
             learner = Learner(gateway=gateway)
             feedback = learner.analyze_failure(
-                tr_dir / result.task_id,
+                run_dir / "execution" / result.task_id,
                 program=prog,
                 stream_callback=_learner_stream if bridge else None,
                 tool_callback=_learner_tool_callback if bridge else None,
@@ -1214,6 +1498,23 @@ def cmd_run(
             raise typer.Exit(1) from exc
 
         console.print(f"[bold]Learner diagnosis:[/bold] {feedback.summary}")
+        # Save learner feedback to the trace directory
+        try:
+            fb_out = {
+                "summary": feedback.summary,
+                "failure_point": feedback.failure_point,
+                "suggestions": [{"category": s.category, "description": s.description, "affected_step_idx": s.affected_step_idx} for s in feedback.suggestions],
+                "new_skill_candidates": [{"proposed_id": c.proposed_id, "description": c.description} for c in feedback.new_skill_candidates] if hasattr(feedback, "new_skill_candidates") else [],
+                "revised_plan_hints": getattr(feedback, "revised_plan_hints", None),
+                "skill_amendments": [{"skill_id": a.skill_id, "issue": a.issue_description, "change": a.proposed_change} for a in feedback.skill_amendments] if hasattr(feedback, "skill_amendments") and feedback.skill_amendments else [],
+            }
+            learner_dir = run_dir / "learner"
+            learner_dir.mkdir(parents=True, exist_ok=True)
+            (learner_dir / f"feedback_attempt_{attempt}.json").write_text(
+                json.dumps(fb_out, indent=2)
+            )
+        except Exception:
+            pass
         if bridge:
             fb_data = {
                 "summary": feedback.summary,
@@ -1291,6 +1592,21 @@ def cmd_run(
             _close_backend(be)
             raise typer.Exit(1)
         prog = plan_result.program
+        # Save revised plan to traces
+        try:
+            plan_dir = run_dir / "plan"
+            plan_dir.mkdir(parents=True, exist_ok=True)
+            plan_data = prog.model_dump(mode="json", exclude_none=True)
+            if goal:
+                plan_data.setdefault("metadata", {})["goal"] = goal
+            (plan_dir / f"plan_attempt_{attempt + 1}.yaml").write_text(
+                yaml.dump(plan_data, default_flow_style=False, sort_keys=False)
+            )
+            code = getattr(prog, "code", None)
+            if code:
+                (plan_dir / f"plan_attempt_{attempt + 1}.py").write_text(code)
+        except Exception:
+            pass
 
         if bridge:
             prog_data = prog.model_dump(mode="json", exclude_none=True) if hasattr(prog, "model_dump") else {}
@@ -1359,6 +1675,7 @@ def cmd_run(
                     _close_backend(be)
                     raise typer.Exit(1)
 
+    _update_run_meta(run_dir, finished=datetime.now(timezone.utc).isoformat())
     _close_backend(be)
 
 
@@ -1515,25 +1832,45 @@ def _run_skill_fixture(skill_cls, fixture_path: Path) -> tuple[bool, str]:  # ty
 
 @traces_app.command("list")
 def cmd_traces_list(
+    traces_dir: Optional[Path] = typer.Option(None, "--traces-dir"),
     tasks_db: Optional[Path] = typer.Option(None, "--tasks-db"),
     limit: int = typer.Option(50, "--limit"),
 ) -> None:
-    db_path = _resolve_db(tasks_db)
-    rows = list_traces(db_path, limit=limit)
-    if not rows:
+    tr_dir = _resolve_traces_dir(traces_dir)
+    if not tr_dir.is_dir():
         console.print("[dim]no traces yet[/dim]")
         return
+
+    # List run directories (t_* pattern) sorted by name (newest first)
+    run_dirs = sorted(
+        (d for d in tr_dir.iterdir() if d.is_dir() and d.name.startswith("t_")),
+        key=lambda d: d.name,
+        reverse=True,
+    )[:limit]
+
+    if not run_dirs:
+        console.print("[dim]no traces yet[/dim]")
+        return
+
     table = Table(show_header=True, header_style="bold")
-    for col in ("task_id", "name", "status", "started", "finished", "events"):
+    for col in ("run_id", "goal", "mode", "status", "started"):
         table.add_column(col)
-    for r in rows:
+    for d in run_dirs:
+        meta_path = d / "meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text())
+            except Exception:
+                meta = {}
+        else:
+            meta = {}
+        goal_text = (meta.get("goal") or "")[:60]
         table.add_row(
-            r["task_id"],
-            r["name"],
-            r["status"],
-            r["started"],
-            r["finished"] or "—",
-            str(r["num_events"]),
+            d.name,
+            goal_text,
+            meta.get("mode", "?"),
+            meta.get("status", "?"),
+            meta.get("started", "?"),
         )
     console.print(table)
 
@@ -1551,9 +1888,79 @@ def cmd_traces_show(
         raise typer.Exit(1)
     meta_path = task_dir / "meta.json"
     if meta_path.exists():
+        console.print("[bold]Run metadata:[/bold]")
         console.print(yaml.safe_dump(json.loads(meta_path.read_text()), sort_keys=False))
+
+    # Show goal
+    goal_path = task_dir / "goal.txt"
+    if goal_path.exists():
+        console.print(f"[bold]Goal:[/bold] {goal_path.read_text().strip()}")
+
+    # Show explorer info
+    explorer_dir = task_dir / "explorer"
+    if explorer_dir.is_dir():
+        console.print("\n[bold cyan]Explorer:[/bold cyan]")
+        obs_path = explorer_dir / "observations.md"
+        if obs_path.exists():
+            console.print(f"  observations: {obs_path}")
+        events_path = explorer_dir / "events.jsonl"
+        if events_path.exists():
+            n_events = sum(1 for _ in events_path.open("r", encoding="utf-8") if _.strip())
+            console.print(f"  events: {n_events}")
+        screens_dir = explorer_dir / "screens"
+        if screens_dir.is_dir():
+            n = len(list(screens_dir.glob("*.png")))
+            console.print(f"  screenshots: {n}")
+
+    # Show plan info
+    plan_dir = task_dir / "plan"
+    if plan_dir.is_dir():
+        console.print("\n[bold cyan]Plan:[/bold cyan]")
+        for f in sorted(plan_dir.iterdir()):
+            console.print(f"  {f.name}")
+
+    # Show execution attempts
+    exec_dir = task_dir / "execution"
+    if exec_dir.is_dir():
+        attempts = sorted(d for d in exec_dir.iterdir() if d.is_dir() and d.name.startswith("attempt_"))
+        for attempt_dir in attempts:
+            console.print(f"\n[bold cyan]Execution {attempt_dir.name}:[/bold cyan]")
+            attempt_meta = attempt_dir / "meta.json"
+            if attempt_meta.exists():
+                console.print(yaml.safe_dump(json.loads(attempt_meta.read_text()), sort_keys=False))
+            events_path = attempt_dir / "events.jsonl"
+            if events_path.exists():
+                for i, line in enumerate(events_path.open("r", encoding="utf-8")):
+                    line = line.rstrip()
+                    if not line:
+                        continue
+                    evt = json.loads(line)
+                    if full:
+                        console.print(line)
+                    else:
+                        console.print(
+                            f"  [cyan]{i:>3}[/cyan] {evt['ts']} [bold]{evt['kind']}[/bold] "
+                            f"{json.dumps(evt.get('data', {}), default=str)[:160]}"
+                        )
+            screens_dir = attempt_dir / "screens"
+            if screens_dir.is_dir():
+                n = len(list(screens_dir.glob("*.png")))
+                console.print(f"  screenshots: {n}")
+            rec = attempt_dir / "recording.mp4"
+            if rec.exists():
+                console.print(f"  recording: {rec}")
+
+    # Show learner info
+    learner_dir = task_dir / "learner"
+    if learner_dir.is_dir():
+        console.print("\n[bold cyan]Learner:[/bold cyan]")
+        for f in sorted(learner_dir.iterdir()):
+            console.print(f"  {f.name}")
+
+    # Fallback: if this is an old-format trace (has events.jsonl at root)
     events_path = task_dir / "events.jsonl"
     if events_path.exists():
+        console.print("\n[bold]Events (legacy format):[/bold]")
         for i, line in enumerate(events_path.open("r", encoding="utf-8")):
             line = line.rstrip()
             if not line:
@@ -1566,10 +1973,10 @@ def cmd_traces_show(
                     f"[cyan]{i:>3}[/cyan] {evt['ts']} [bold]{evt['kind']}[/bold] "
                     f"{json.dumps(evt.get('data', {}), default=str)[:160]}"
                 )
-    screens_dir = task_dir / "screens"
-    if screens_dir.is_dir():
-        n = len(list(screens_dir.glob("*.png")))
-        console.print(f"[dim]screenshots: {n} ({screens_dir})[/dim]")
+        screens_dir = task_dir / "screens"
+        if screens_dir.is_dir():
+            n = len(list(screens_dir.glob("*.png")))
+            console.print(f"[dim]screenshots: {n} ({screens_dir})[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -1681,9 +2088,20 @@ def cmd_teach(
         console.print(f"[red]missing trace dirs: {missing}[/red]")
         raise typer.Exit(2)
 
+    # Collect execution attempt directories from the new nested structure
+    execution_dirs: list[Path] = []
+    for td in task_dirs:
+        exec_dir = td / "execution"
+        if exec_dir.is_dir():
+            for attempt_dir in sorted(exec_dir.iterdir()):
+                if attempt_dir.is_dir() and attempt_dir.name.startswith("attempt_"):
+                    execution_dirs.append(attempt_dir)
+        elif (td / "events.jsonl").exists():
+            execution_dirs.append(td)
+
     from daedalus.learner.analysis import analyze_traces
 
-    findings = analyze_traces(task_dirs)
+    findings = analyze_traces(execution_dirs if execution_dirs else task_dirs)
     console.print(f"[bold]traces analysed:[/bold] {findings.traces_analyzed}")
     if findings.notes:
         console.print("[bold]heuristic notes:[/bold]")

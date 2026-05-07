@@ -347,12 +347,16 @@ class VNCBackend:
                     client.keyPress("enter")
                 elif ch == "\t":
                     client.keyPress("tab")
-                elif ch.isupper() and ch.isascii():
-                    client.keyDown("shift")
-                    client.keyPress(ch.lower())
-                    client.keyUp("shift")
+                elif ch == " ":
+                    client.keyPress("space")
                 else:
+                    # Send the character directly — vncdotool uses ord(ch) as the
+                    # keysym for single characters not in KEYMAP. For printable
+                    # ASCII, the keysym equals the character code (e.g. 'A'=65,
+                    # 'a'=97, '!'=33), so the VNC server receives the exact
+                    # character we want without needing shift modifiers.
                     client.keyPress(ch)
+                time.sleep(0.02)
         except Exception as exc:
             raise BackendError(f"VNC write failed: {exc}") from exc
 

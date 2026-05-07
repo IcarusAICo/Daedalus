@@ -39,11 +39,14 @@ class FrontendBridge:
         self._events_file: Any | None = None
         self._run_events_file: Any | None = None
         self._events_lock = threading.Lock()
+        self._request_handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+        self._closed_event = threading.Event()
 
     def start(self, on_command: Callable[[str, dict[str, Any]], None] | None = None) -> None:
         """Start the background reader thread for incoming commands."""
         self._on_command = on_command
         self._running = True
+        self._closed_event.clear()
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._reader_thread.start()
 
@@ -83,6 +86,7 @@ class FrontendBridge:
                 self._handle_incoming(msg)
             except (json.JSONDecodeError, OSError):
                 continue
+        self._closed_event.set()
 
     def _handle_incoming(self, msg: dict[str, Any]) -> None:
         # Response to a request we sent
@@ -93,12 +97,37 @@ class FrontendBridge:
                 self._pending[msg_id].set()
             return
 
+        # Request from frontend (has both id and method — needs a response)
+        if "id" in msg and "method" in msg:
+            method = msg["method"]
+            params = msg.get("params", {})
+            msg_id = msg["id"]
+            handler = self._request_handlers.get(method)
+            if handler:
+                try:
+                    result = handler(params)
+                    response = {"jsonrpc": "2.0", "id": msg_id, "result": result}
+                except Exception as exc:
+                    response = {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -1, "message": str(exc)}}
+            else:
+                response = {"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": f"no handler for {method}"}}
+            self._write(response)
+            return
+
         # Command from frontend (notification)
         if "method" in msg and "id" not in msg:
             method = msg["method"]
             params = msg.get("params", {})
             if self._on_command:
                 self._on_command(method, params)
+
+    def register_handler(self, method: str, handler: Callable[[dict[str, Any]], dict[str, Any]]) -> None:
+        """Register a handler for incoming requests from the frontend."""
+        self._request_handlers[method] = handler
+
+    def wait_until_closed(self) -> None:
+        """Block until the reader thread exits (stdin closed)."""
+        self._closed_event.wait()
 
     # ------------------------------------------------------------------
     # Sending

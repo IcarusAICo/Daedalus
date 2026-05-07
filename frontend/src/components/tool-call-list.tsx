@@ -10,7 +10,7 @@ interface ToolCallListProps {
 
 export function ToolCallList({
   calls,
-  maxVisible = 15,
+  maxVisible = 50,
 }: ToolCallListProps): React.ReactElement | null {
   if (calls.length === 0) return null;
 

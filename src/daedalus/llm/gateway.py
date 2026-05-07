@@ -148,6 +148,9 @@ class LLMGateway:
         """Execute a completion. If stream_callback is provided, streams content tokens."""
         import litellm  # local import: keeps daedalus importable without litellm in dev
 
+        litellm.suppress_debug_info = True
+        litellm.modify_params = True
+
         # Apply provider env defaults at call time so config swaps work.
         if self._config.aws_region:
             os.environ.setdefault("AWS_REGION", self._config.aws_region)
@@ -332,12 +335,19 @@ def _sanitize_message_sequence(messages: list[dict[str, Any]]) -> list[dict[str,
     for i, msg in enumerate(messages):
         role = msg.get("role", "")
         if role == "tool":
-            # Check if preceded by assistant with tool_calls
-            if result and result[-1].get("role") == "assistant":
-                tc = result[-1].get("tool_calls")
-                if tc:
-                    result.append(msg)
+            # Check if there's a preceding assistant with tool_calls (may have
+            # other tool messages in between for multi-tool-call responses).
+            has_parent_assistant = False
+            for prev in reversed(result):
+                prev_role = prev.get("role", "")
+                if prev_role == "tool":
                     continue
+                if prev_role == "assistant" and prev.get("tool_calls"):
+                    has_parent_assistant = True
+                break
+            if has_parent_assistant:
+                result.append(msg)
+                continue
             # Orphaned tool message — convert to user
             content = msg.get("content", "")
             if isinstance(content, list):

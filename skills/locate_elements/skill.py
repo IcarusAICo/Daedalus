@@ -86,15 +86,12 @@ class LocateElements(AtomicSkill):
 
         shot = ctx.backend.screenshot()
 
-        # Downscale to LLM resolution for consistent coordinate space
+        # Send full-resolution image for best grounding accuracy,
+        # request coordinates in the LLM's reference frame.
         llm_w, llm_h = llm_image_size(shot.width, shot.height)
-        img = shot.image
-        if (llm_w, llm_h) != (shot.width, shot.height):
-            from PIL import Image as _Image
-            img = img.resize((llm_w, llm_h), _Image.LANCZOS)
 
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="PNG")
+        shot.image.convert("RGB").save(buf, format="PNG")
         image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
         grounding_cfg = (ctx.config or {}).get("grounding", {})
@@ -132,6 +129,8 @@ class LocateElements(AtomicSkill):
                     "description": inputs.description,
                     "mode": "all",
                     "confidence_threshold": inputs.confidence_threshold,
+                    "target_width": screen_w,
+                    "target_height": screen_h,
                 },
                 timeout=timeout_s,
             )

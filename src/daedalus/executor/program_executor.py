@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import logging
 import math
 import threading
 import time
@@ -39,6 +40,8 @@ from daedalus.executor.daemons import DaemonHandle, DaemonSpec, start_daemons, s
 from daedalus.executor.dsl import PythonProgram
 from daedalus.executor.runner import RunResult, StepResult
 from daedalus.tracing.recorder import TraceRecorder
+
+log = logging.getLogger(__name__)
 
 
 _ALLOWED_BUILTINS = {
@@ -90,7 +93,11 @@ def lint_plan_code(source: str) -> list[str]:
 
 
 class SkillProxy:
-    """Proxy object that exposes skills as callable methods (ctx.skill_id(...))."""
+    """Proxy object that exposes skills as callable methods (ctx.skill_id(...)).
+
+    For service skills, calling ``ctx.skill_id(...)`` returns a
+    :class:`ServiceInstanceProxy` with ``.query(...)`` and ``.stop()`` methods.
+    """
 
     def __init__(
         self,
@@ -109,6 +116,7 @@ class SkillProxy:
         self._step_idx = 0
         self._results: list[StepResult] = []
         self._event_callback = event_callback
+        self._services: dict[str, "ServiceInstanceProxy"] = {}
         self.store = execution_ctx.store
         self.state = execution_ctx.task_state
 
@@ -117,6 +125,9 @@ class SkillProxy:
             entry = self._registry.get(name)
         except SkillNotFoundError:
             raise AttributeError(f"no skill named {name!r}") from None
+
+        if entry.cls.SPEC.kind == "service":
+            return self._make_service_starter(entry)
 
         def _invoke(**kwargs: Any) -> Any:
             if self._abort_event.is_set():
@@ -196,6 +207,56 @@ class SkillProxy:
 
         return _invoke
 
+    def _make_service_starter(self, entry: Any) -> Callable[..., "ServiceInstanceProxy"]:
+        def _start_service(**kwargs: Any) -> "ServiceInstanceProxy":
+            from daedalus.executor.services import ServiceHandle
+
+            if self._abort_event.is_set():
+                raise UserAbortError("aborted by user")
+
+            inputs_model = entry.cls.Inputs.model_validate(kwargs)
+            handle = ServiceHandle(entry.cls, inputs_model, self._ctx)
+            handle.start()
+
+            svc_proxy = ServiceInstanceProxy(
+                handle=handle,
+                tracer=self._tracer,
+                proxy=self,
+                event_callback=self._event_callback,
+            )
+            self._services[entry.id] = svc_proxy
+            return svc_proxy
+
+        return _start_service
+
+    def _stop_all_services(self) -> None:
+        for svc in self._services.values():
+            svc.stop()
+        self._services.clear()
+
+
+class ServiceInstanceProxy:
+    """Proxy for a running service instance within a PythonProgram."""
+
+    def __init__(
+        self,
+        handle: Any,
+        tracer: TraceRecorder,
+        proxy: SkillProxy,
+        event_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> None:
+        self._handle = handle
+        self._tracer = tracer
+        self._proxy = proxy
+        self._event_callback = event_callback
+
+    def query(self, **kwargs: Any) -> Any:
+        result = self._handle.query(kwargs)
+        return result
+
+    def stop(self) -> None:
+        self._handle.stop()
+
 
 class PythonProgramExecutor:
     """Execute a PythonProgram (v2) against a backend."""
@@ -210,7 +271,7 @@ class PythonProgramExecutor:
         config: dict[str, Any] | None = None,
         abort_event: threading.Event | None = None,
         step_timeout_s: float = 30.0,
-        program_timeout_s: float = 300.0,
+        program_timeout_s: float = 1000.0,
         status_callback: Callable[[str], None] | None = None,
         event_callback: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
@@ -232,6 +293,7 @@ class PythonProgramExecutor:
         *,
         program_ref: str | None = None,
         success_criteria: SuccessCriteria | None = None,
+        task_id: str | None = None,
     ) -> RunResult:
         lint_errors = lint_plan_code(program.code)
         if lint_errors:
@@ -244,6 +306,7 @@ class PythonProgramExecutor:
             db_path=self._tasks_db,
             task_name=program.name,
             program_ref=program_ref,
+            task_id=task_id,
         )
         if self._llm is not None:
             self._llm.set_tracer(tracer)
@@ -280,6 +343,7 @@ class PythonProgramExecutor:
             try:
                 self._backend.connect()
                 connected = True
+                log.info("backend connected (size=%s)", getattr(self._backend, "size", "unknown"))
             except Exception as exc:
                 raise BackendError(f"backend.connect failed: {exc}") from exc
 
@@ -326,12 +390,21 @@ class PythonProgramExecutor:
                     future.result(timeout=self._program_timeout_s)
                 except FuturesTimeoutError:
                     self._abort_event.set()
+                    steps_completed = proxy._step_idx
+                    log.error(
+                        "plan timed out after %.0fs — %d steps completed",
+                        self._program_timeout_s, steps_completed,
+                    )
                     raise DaedalusTimeoutError(
                         f"plan timed out after {self._program_timeout_s:.0f}s"
                     )
 
             result.steps = proxy._results
             result.status = "success"
+            log.info(
+                "plan completed successfully — %d steps in %.1fs",
+                len(result.steps), result.duration_s,
+            )
             tracer.emit("program_finished", {"status": "success"})
 
             if success_criteria is not None:
@@ -342,6 +415,7 @@ class PythonProgramExecutor:
                     result.status = "goal_achieved"
                 else:
                     result.status = "goal_not_achieved"
+                log.info("goal evaluation: %s", result.status)
                 tracer.emit(
                     "program_finished",
                     {"status": result.status, "goal_achieved": verdict.achieved},
@@ -353,12 +427,14 @@ class PythonProgramExecutor:
         except UserAbortError:
             result.steps = proxy._results if "proxy" in dir() else []
             result.status = "aborted"
+            log.warning("plan aborted by user after %d steps", len(result.steps))
             tracer.finish("aborted")
             tracer.emit("program_finished", {"status": "aborted"}, level="warn")
         except DaedalusError as exc:
             result.steps = proxy._results if "proxy" in dir() else []
             result.status = "failed"
             result.error_message = str(exc)
+            log.error("plan failed (%s): %s — %d steps completed", type(exc).__name__, exc, len(result.steps))
             tracer.finish("failed", notes=str(exc))
             tracer.emit(
                 "program_finished",
@@ -369,6 +445,7 @@ class PythonProgramExecutor:
             result.steps = proxy._results if "proxy" in dir() else []
             result.status = "failed"
             result.error_message = str(exc)
+            log.exception("plan failed with unexpected error after %d steps", len(result.steps))
             tracer.finish("failed", notes=str(exc))
             tracer.emit(
                 "program_finished",
@@ -376,6 +453,8 @@ class PythonProgramExecutor:
                 level="error",
             )
         finally:
+            if "proxy" in dir() and hasattr(proxy, "_stop_all_services"):
+                proxy._stop_all_services()
             if daemons:
                 stop_daemons(daemons, ctx)
             result.finished_at = time.time()
