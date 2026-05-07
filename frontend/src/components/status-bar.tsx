@@ -82,6 +82,9 @@ export function StatusBar({ isReplay }: StatusBarProps): React.ReactElement {
         {contextUsage && (currentPhase === "explorer" || currentPhase === "learner") && (
           <ContextGauge used={contextUsage.used} max={contextUsage.max} />
         )}
+        {currentPhase === "executor" && (
+          <Text dimColor>Ctrl+L: learn</Text>
+        )}
         <Text dimColor>Ctrl+C: exit</Text>
       </Box>
     </Box>

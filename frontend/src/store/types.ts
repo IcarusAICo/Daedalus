@@ -123,6 +123,7 @@ export interface DaedalusConfig {
   executor: ExecutorConfig;
   maxRetries: number;
   exploreSteps: number;
+  learnerSteps: number;
   record: boolean;
   recordFps: number;
   skillsDir: string;
@@ -199,6 +200,7 @@ export const DEFAULT_CONFIG: DaedalusConfig = {
   },
   maxRetries: 3,
   exploreSteps: 20,
+  learnerSteps: 15,
   record: false,
   recordFps: 30,
   skillsDir: "./skills",

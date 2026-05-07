@@ -36,18 +36,20 @@ class VisionReasonOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     response: str = Field(description="The vision model's answer/reasoning about the image content.")
+    found: bool = Field(description="Whether the image contains the information requested. False if the query cannot be answered from this image.")
 
 
 @register
 class VisionQuery(AtomicSkill):
     SPEC = SkillSpec(
         id="vision_query",
-        version=SkillVersion(raw="0.3.0"),
+        version=SkillVersion(raw="0.4.0"),
         kind="atomic",
         description=(
-            "Ask a question about an image. By default uses the last screenshot "
-            "from view_screen, or pass an explicit image_path. "
-            "This skill is READ-ONLY — it never clicks, types, or interacts."
+            "Ask a question about an image. Returns the answer plus a 'found' boolean "
+            "indicating whether the image contains the requested information. "
+            "By default uses the last screenshot from view_screen, or pass an explicit "
+            "image_path. This skill is READ-ONLY — it never clicks, types, or interacts."
         ),
         side_effects=["llm_call"],
         preconditions=["ctx.llm is configured with a vision role"],
@@ -70,7 +72,7 @@ class VisionQuery(AtomicSkill):
 
     def run(self, inputs: VisionReasonInput, ctx: ExecutionContext) -> VisionReasonOutput:  # type: ignore[override]
         if ctx.llm is None:
-            return VisionReasonOutput(response="[no llm configured]")
+            return VisionReasonOutput(response="[no llm configured]", found=False)
 
         image_path = inputs.image_path
         if image_path is None:
@@ -79,11 +81,11 @@ class VisionQuery(AtomicSkill):
                 image_path = last["image_path"]
 
         if image_path is None:
-            return VisionReasonOutput(response="[no image available — call view_screen first]")
+            return VisionReasonOutput(response="[no image available — call view_screen first]", found=False)
 
         p = Path(image_path)
         if not p.exists():
-            return VisionReasonOutput(response=f"[image not found: {image_path}]")
+            return VisionReasonOutput(response=f"[image not found: {image_path}]", found=False)
 
         raw = p.read_bytes()
         mime = "image/png"
@@ -101,7 +103,17 @@ class VisionQuery(AtomicSkill):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": inputs.prompt},
+                    {
+                        "type": "text",
+                        "text": (
+                            f"{inputs.prompt}\n\n"
+                            "IMPORTANT: Start your response with FOUND or NOT_FOUND on its own line.\n"
+                            "- FOUND: if the image contains the information needed to answer the query.\n"
+                            "- NOT_FOUND: if the image does NOT contain what was asked about "
+                            "(e.g. wrong screen, element not visible, content not loaded).\n"
+                            "Then provide your answer on subsequent lines."
+                        ),
+                    },
                     {
                         "type": "image_url",
                         "image_url": {"url": f"data:{mime};base64,{image_b64}"},
@@ -126,4 +138,14 @@ class VisionQuery(AtomicSkill):
                 resp = ctx.llm.complete(call)
             else:
                 raise
-        return VisionReasonOutput(response=resp.content)
+
+        content = resp.content.strip()
+        first_line = content.split("\n", 1)[0].strip().upper()
+        found = not first_line.startswith("NOT_FOUND")
+        # Strip the FOUND/NOT_FOUND prefix from the response
+        if first_line in ("FOUND", "NOT_FOUND"):
+            response_text = content.split("\n", 1)[1].strip() if "\n" in content else ""
+        else:
+            response_text = content
+
+        return VisionReasonOutput(response=response_text or content, found=found)

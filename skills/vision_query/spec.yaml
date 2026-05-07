@@ -1,9 +1,10 @@
 id: vision_query
-version: 0.3.0
+version: 0.4.0
 kind: atomic
-description: Ask a question about an image. By default uses the last screenshot from
-  view_screen, or pass an explicit image_path. This skill is READ-ONLY — it never
-  clicks, types, or interacts.
+description: Ask a question about an image. Returns the answer plus a 'found' boolean
+  indicating whether the image contains the requested information. By default uses
+  the last screenshot from view_screen, or pass an explicit image_path. This skill
+  is READ-ONLY — it never clicks, types, or interacts.
 side_effects:
 - llm_call
 preconditions:

@@ -395,6 +395,7 @@ function getFields(
     { label: "Step Timeout (s)", path: "executor.stepTimeoutS", value: config.executor.stepTimeoutS, type: "number", section: 3 },
     { label: "Max Retries", path: "maxRetries", value: config.maxRetries, type: "number", section: 3 },
     { label: "Explore Steps", path: "exploreSteps", value: config.exploreSteps, type: "number", section: 3 },
+    { label: "Learner Steps", path: "learnerSteps", value: config.learnerSteps, type: "number", section: 3 },
     { label: "Record", path: "record", value: config.record, type: "boolean", section: 4 },
     { label: "Record FPS", path: "recordFps", value: config.recordFps, type: "number", section: 4 },
     { label: "No Strategy", path: "noStrategy", value: config.noStrategy, type: "boolean", section: 4 },
@@ -452,6 +453,7 @@ function loadConfigFromFile(
     const agent = raw.agent || {};
     if (agent.max_retries !== undefined) patch.maxRetries = agent.max_retries;
     if (agent.explore_steps !== undefined) patch.exploreSteps = agent.explore_steps;
+    if (agent.learner_steps !== undefined) patch.learnerSteps = agent.learner_steps;
     if (agent.no_strategy !== undefined) patch.noStrategy = agent.no_strategy;
     if (agent.verbose !== undefined) patch.verbose = agent.verbose;
     if (agent.record !== undefined) patch.record = agent.record;

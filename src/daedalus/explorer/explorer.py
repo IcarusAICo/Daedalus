@@ -342,7 +342,10 @@ and dynamic content make them unreliable. Instead, report:
 Call explore_done when you understand the interaction mechanics well enough \
 for the planner to write a ROBUST program that works from a fresh start. \
 Your observations should enable a plan that works even on a different day, \
-from a clean desktop, with different data. Include a list of any new skills \
+from a clean desktop, with different data. The planner executes a program, whereas \
+you are a researcher, remember that the planner cannot make dynamic decisions as easily \
+(i.e. navigating a map). Make sure to develop as many skills as possible (and test them) \
+so that the planner's job is easier. Include a list of any new skills \
 you registered so the planner knows they are available.
 """
 

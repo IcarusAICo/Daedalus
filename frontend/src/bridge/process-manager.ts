@@ -48,6 +48,7 @@ function buildTempConfig(config: DaedalusConfig, projectRoot: string): string {
     agent: {
       max_retries: config.maxRetries,
       explore_steps: config.exploreSteps,
+      learner_steps: config.learnerSteps,
       no_strategy: config.noStrategy,
       verbose: config.verbose,
       record: config.record,
@@ -104,6 +105,7 @@ export class ProcessManager {
 
     args.push("--max-retries", String(store.config.maxRetries));
     args.push("--explore-steps", String(store.config.exploreSteps));
+    args.push("--learner-steps", String(store.config.learnerSteps));
 
     if (store.config.backend.kind === "vnc") {
       args.push("--backend", "vnc");
@@ -206,6 +208,10 @@ export class ProcessManager {
 
   abort(): void {
     this.bridge?.send("abort");
+  }
+
+  forceLearn(): void {
+    this.bridge?.send("force_learn");
   }
 
   stop(): void {

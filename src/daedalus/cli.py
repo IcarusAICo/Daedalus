@@ -645,6 +645,7 @@ def cmd_run(
     no_strategy: bool = typer.Option(False, "--no-strategy", help="Skip the strategy phase (no proactive skill synthesis)."),
     mode: str = typer.Option("learn", "--mode", "-m", help="Agent mode: learn (explore+plan+learn), explore (explorer solves directly), plan (skip explorer, go to planner), test (interactive skill REPL)."),
     explore_steps: int = typer.Option(20, "--explore-steps", help="Max explorer iterations."),
+    learner_steps: int = typer.Option(15, "--learner-steps", help="Max learner iterations per attempt."),
     max_retries: int = typer.Option(3, "--max-retries", "-r", help="Max learner retry loops on failure."),
     learn_on_succeed: bool = typer.Option(False, "--learn-on-succeed", help="Run learner analysis even on success."),
     record: bool = typer.Option(False, "--record", help="Record the screen via ffmpeg during execution (saves to trace dir)."),
@@ -661,9 +662,13 @@ def cmd_run(
         from daedalus.ui.frontend_bridge import FrontendBridge
         bridge = FrontendBridge()
         abort_event = __import__("threading").Event()
+        force_learn_event = __import__("threading").Event()
 
         def _on_frontend_command(method: str, params: dict) -> None:
             if method == "abort":
+                abort_event.set()
+            elif method == "force_learn":
+                force_learn_event.set()
                 abort_event.set()
 
         bridge.start(on_command=_on_frontend_command)
@@ -719,6 +724,8 @@ def cmd_run(
             max_retries = int(_agent_cfg["max_retries"])
         if explore_steps == 20 and "explore_steps" in _agent_cfg:
             explore_steps = int(_agent_cfg["explore_steps"])
+        if learner_steps == 15 and "learner_steps" in _agent_cfg:
+            learner_steps = int(_agent_cfg["learner_steps"])
         if mode == "learn" and _agent_cfg.get("no_explore"):
             mode = "plan"
         if not no_strategy and _agent_cfg.get("no_strategy"):
@@ -1372,9 +1379,16 @@ def cmd_run(
         _update_run_meta(run_dir, status=result.status, attempts=attempt + 1)
 
         if is_aborted:
-            console.print("[yellow]aborted by user[/yellow]")
-            _close_backend(be)
-            raise typer.Exit(1)
+            # Check if this was a force_learn request (Ctrl+L hotkey)
+            if frontend_mode and force_learn_event.is_set():
+                force_learn_event.clear()
+                abort_event.clear()
+                console.print("[cyan]user forced learner; analyzing trace...[/cyan]")
+                # Fall through to the failure/learner path below
+            else:
+                console.print("[yellow]aborted by user[/yellow]")
+                _close_backend(be)
+                raise typer.Exit(1)
 
         if is_success:
             if learn_on_succeed and goal is not None:
@@ -1409,7 +1423,7 @@ def cmd_run(
                             bridge.emit_event("skill_finished", data)
 
                 try:
-                    learner = Learner(gateway=gateway)
+                    learner = Learner(gateway=gateway, max_iterations=learner_steps)
                     feedback = learner.analyze_success(
                         run_dir / "execution" / result.task_id,
                         program=prog,
@@ -1509,7 +1523,7 @@ def cmd_run(
                     bridge.emit_event("skill_finished", data)
 
         try:
-            learner = Learner(gateway=gateway)
+            learner = Learner(gateway=gateway, max_iterations=learner_steps)
             feedback = learner.analyze_failure(
                 run_dir / "execution" / result.task_id,
                 program=prog,
