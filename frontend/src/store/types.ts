@@ -5,6 +5,7 @@ export type PhaseId =
   | "explorer"
   | "strategy"
   | "planner"
+  | "resetter"
   | "executor"
   | "evaluator"
   | "learner";
@@ -172,6 +173,7 @@ export interface AgentState {
   chatMessages: ChatMessage[];
   config: DaedalusConfig;
   connected: boolean;
+  backendConnected: boolean;
   startedAt: string | null;
   taskId: string | null;
   attempt: number;

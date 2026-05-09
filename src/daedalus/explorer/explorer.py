@@ -18,13 +18,20 @@ from typing import Any, Callable
 
 from daedalus.backends.protocol import RemoteDesktop
 from daedalus.core.context import ExecutionContext, TaskState, compute_coordinate_scale
-from daedalus.core.errors import DaedalusError, SkillNotFoundError
+from daedalus.core.errors import DaedalusError
 from daedalus.core.registry import Registry, get_registry
 from daedalus.core.store import RunStore
-from daedalus.implementor.implementor import ImplementorRequest, SyntheticSkillImplementor
+from daedalus.implementor.implementor import SyntheticSkillImplementor
 from daedalus.library.librarian import Librarian
 from daedalus.llm.context import estimate_token_count, get_context_config, prune_old_images, summarize_and_compact
 from daedalus.llm.gateway import LLMCall, LLMGateway, LLMRole, ToolCall
+from daedalus.shared.skill_caller import (
+    encode_image_for_llm as _encode_image_for_llm,
+    handle_implement_skill,
+    handle_revise_skill,
+    handle_skill_call,
+    skill_to_tool_def as _skill_to_tool_def,
+)
 from daedalus.tracing.recorder import TraceRecorder
 
 log = logging.getLogger(__name__)
@@ -34,32 +41,6 @@ DEFAULT_MAX_ITERATIONS = 20
 # Maximum image payload size (bytes) before converting PNG → JPEG for the LLM.
 # Bedrock/Anthropic payload limit is ~5MB; we convert above 3.5MB to stay safe.
 _MAX_PNG_BYTES_FOR_LLM = 3_500_000
-
-
-def _encode_image_for_llm(path: Path) -> tuple[str, str]:
-    """Encode an image for LLM consumption, converting large PNGs to JPEG.
-
-    Returns (base64_str, mime_type).
-    On-disk file is never modified — conversion is in-memory only.
-    """
-    import base64
-    import io
-
-    raw = path.read_bytes()
-    if len(raw) <= _MAX_PNG_BYTES_FOR_LLM:
-        return base64.b64encode(raw).decode("ascii"), "image/png"
-
-    from PIL import Image
-
-    img = Image.open(io.BytesIO(raw))
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="JPEG", quality=85)
-    jpeg_bytes = buf.getvalue()
-    log.debug(
-        "image %s converted PNG(%dKB)->JPEG(%dKB) for LLM",
-        path.name, len(raw) // 1024, len(jpeg_bytes) // 1024,
-    )
-    return base64.b64encode(jpeg_bytes).decode("ascii"), "image/jpeg"
 
 
 class ExplorerError(DaedalusError):
@@ -116,7 +97,7 @@ _TOOL_EXPLORE_DONE = {
             "Signal that exploration is complete. Provide structured observations "
             "that enable the planner to write a ROBUST, REUSABLE program that works "
             "from a fresh start. Include: how to launch/navigate to the task, "
-            "interaction mechanics, skills you registered, and strategy guidance. "
+            "interaction mechanics, skills you created, and strategy guidance. "
             "Do NOT assume the planner inherits your current screen state."
         ),
         "parameters": {
@@ -130,7 +111,7 @@ _TOOL_EXPLORE_DONE = {
                         "2) Interaction mechanics and navigation patterns, "
                         "3) Problem rules/constraints discovered, "
                         "4) Recommended strategy that works robustly (not just today), "
-                        "5) 'New skills registered' section listing skills you created "
+                        "5) 'New skills created' section listing skills you created "
                         "with a one-line description of each. "
                         "Do NOT include instructions like 'I already did X' — the "
                         "planner's program starts fresh."
@@ -138,29 +119,6 @@ _TOOL_EXPLORE_DONE = {
                 },
             },
             "required": ["observations"],
-        },
-    },
-}
-
-_TOOL_REGISTER_SKILL = {
-    "type": "function",
-    "function": {
-        "name": "register_skill",
-        "description": (
-            "Promote a temp skill to the permanent skills library. Call this "
-            "after you have tested the skill and confirmed it works correctly "
-            "in the live environment. Only skills created via implement_skill "
-            "in this session can be registered."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "skill_name": {
-                    "type": "string",
-                    "description": "The skill_id to promote (must be a temp skill from this session).",
-                },
-            },
-            "required": ["skill_name"],
         },
     },
 }
@@ -200,32 +158,6 @@ _TOOL_REVISE_SKILL = {
 }
 
 
-def _skill_to_tool_def(entry) -> dict[str, Any]:
-    """Convert a registered skill into an OpenAI function-calling tool definition."""
-    spec = entry.cls.SPEC
-    input_schema = entry.cls.Inputs.model_json_schema()
-
-    # Clean up the schema for the tool definition: strip $defs and title at the
-    # top level so it's a simple properties/required object for the LLM.
-    params: dict[str, Any] = {"type": "object"}
-    if "properties" in input_schema:
-        params["properties"] = input_schema["properties"]
-    else:
-        params["properties"] = {}
-    if "required" in input_schema:
-        params["required"] = input_schema["required"]
-    if "$defs" in input_schema:
-        params["$defs"] = input_schema["$defs"]
-
-    return {
-        "type": "function",
-        "function": {
-            "name": entry.id,
-            "description": spec.description,
-            "parameters": params,
-        },
-    }
-
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -252,7 +184,7 @@ STRATEGY:
 1. Start by calling view_screen() to see the current state.
 2. Experiment with interactions: try buttons, hotkeys, navigation methods.
 3. Understand the problem deeply — rules, layout, state transitions.
-4. Build and register skills for any reusable multi-step sequences.
+4. Build skills for any reusable multi-step sequences.
 5. When you have enough knowledge, call explore_done with structured observations.
 
 CRITICAL RULE — DO NOT PARTIALLY SOLVE THE TASK:
@@ -284,7 +216,10 @@ The paradigm:
 2. IMPLEMENT: Call implement_skill to encode that sequence as a reusable skill
    (e.g. implement_skill(skill_name="open_firefox_incognito", description="..."))
 3. TEST: Call the new skill once to verify it works correctly in the live environment
-4. REGISTER: If it worked, call register_skill to promote it to the permanent library
+4. REVISE: If something is wrong, call revise_skill with feedback to fix it
+
+All implemented skills remain as temp skills for the duration of the run. They \
+can be revised at any time if issues are found.
 
 Good candidates for new skills:
 - Any multi-step UI sequence you had to figure out (open app, navigate to a view,
@@ -297,7 +232,7 @@ Good candidates for new skills:
 Do NOT create trivial single-action skills (e.g. a skill that just calls click_element).
 A good skill composes 2+ steps into a reliable, parameterized unit.
 
-When you call explore_done, list the skills you registered so the planner can use them.
+When you call explore_done, list the skills you created so the planner can use them.
 
 GUIDELINES:
 - Be ACTION-ORIENTED: test tools and discover interactions, don't just look
@@ -346,7 +281,7 @@ from a clean desktop, with different data. The planner executes a program, where
 you are a researcher, remember that the planner cannot make dynamic decisions as easily \
 (i.e. navigating a map). Make sure to develop as many skills as possible (and test them) \
 so that the planner's job is easier. Include a list of any new skills \
-you registered so the planner knows they are available.
+you created so the planner knows they are available.
 """
 
 
@@ -372,9 +307,9 @@ The paradigm:
    (e.g. you work out how to open an app, fetch an API, or interact with a widget)
 2. IMPLEMENT: Call implement_skill to encode that sequence as a reusable skill
    (e.g. implement_skill(skill_name="open_firefox_incognito", description="..."))
-3. TEST: Call the new skill once to verify it works correctly in the live environment, and revise if needed
-4. REGISTER: If it worked, call register_skill to promote it to the permanent library
-5. CONTINUE: Use the newly registered skill for the rest of this task
+3. TEST: Call the new skill once to verify it works correctly in the live environment
+4. REVISE: If something is wrong, call revise_skill with feedback to fix it
+5. CONTINUE: Use the new skill for the rest of this task
 
 Good candidates for new skills:
 - Any multi-step UI sequence you had to figure out (open app, navigate to a view,
@@ -418,7 +353,7 @@ and dynamic content make them unreliable. Instead, use:
 - Relative spatial relationships ("the button is below the header")
 
 Call explore_done when the task is complete. Provide a summary of what you \
-accomplished, any relevant observations, and the list of new skills you registered.
+accomplished, any relevant observations, and the list of new skills you created.
 """
 
 
@@ -462,7 +397,6 @@ class Explorer:
                 continue
             tools.append(_skill_to_tool_def(entry))
         tools.append(_TOOL_IMPLEMENT_SKILL)
-        tools.append(_TOOL_REGISTER_SKILL)
         tools.append(_TOOL_REVISE_SKILL)
         tools.append(_TOOL_EXPLORE_DONE)
         return tools
@@ -766,9 +700,6 @@ class Explorer:
             elif tc.name == "implement_skill":
                 result = self._handle_implement_skill(tc.arguments, new_skills)
                 return result, False
-            elif tc.name == "register_skill":
-                result = self._handle_register_skill(tc.arguments)
-                return result, False
             elif tc.name == "revise_skill":
                 result = self._handle_revise_skill(tc.arguments)
                 return result, False
@@ -783,182 +714,34 @@ class Explorer:
         return args.get("observations", "")
 
     def _handle_skill_call(self, skill_id: str, kwargs: dict[str, Any], ctx: ExecutionContext) -> str | list[dict[str, Any]]:
-        """Execute a skill directly by ID with the provided arguments.
-
-        Returns either a plain string or a multimodal content list (with image
-        blocks) when the skill output contains base64 image data.
-        """
-        try:
-            entry = self._registry.get(skill_id)
-        except SkillNotFoundError:
-            return json.dumps({"error": f"skill {skill_id!r} not found"})
-
-        try:
-            inputs_model = entry.cls.Inputs.model_validate(kwargs)
-            instance = entry.cls()
-            output = instance.run(inputs_model, ctx)
-            out_dict = output.model_dump(mode="json") if hasattr(output, "model_dump") else dict(output)
-
-            # If the output contains an image_path, read it and return as a
-            # multimodal content block so the LLM can see it directly.
-            image_path = out_dict.get("image_path")
-            if image_path and isinstance(image_path, str):
-                self._last_image_path = image_path
-                from pathlib import Path as _Path
-                img_file = _Path(image_path)
-                if img_file.exists():
-                    import base64 as _b64
-                    image_b64, mime = _encode_image_for_llm(img_file)
-                    metadata = json.dumps({k: v for k, v in out_dict.items() if k != "image_path"}, default=str)
-                    content_parts: list[dict[str, Any]] = [
-                        {"type": "text", "text": metadata},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime};base64,{image_b64}"},
-                        },
-                    ]
-                    return content_parts
-
-            # Legacy: if the output contains a base64 image directly.
-            image_b64 = out_dict.pop("image_b64", None)
-            if image_b64 and isinstance(image_b64, str) and len(image_b64) > 100:
-                metadata = json.dumps(out_dict, default=str)
-                content_parts = [
-                    {"type": "text", "text": metadata},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{image_b64}"},
-                    },
-                ]
-                return content_parts
-
-            # Truncate very large outputs for the conversation.
-            result_str = json.dumps(out_dict, default=str)
-            if len(result_str) > 8000:
-                for key in list(out_dict.keys()):
-                    val = out_dict[key]
-                    if isinstance(val, str) and len(val) > 2000:
-                        out_dict[key] = val[:200] + f"... [truncated, {len(val)} chars total]"
-                result_str = json.dumps(out_dict, default=str)
-
-            return result_str
-        except Exception as exc:
-            return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+        """Execute a skill directly by ID with the provided arguments."""
+        result = handle_skill_call(skill_id, kwargs, ctx, self._registry)
+        if isinstance(result, list):
+            for part in result:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    try:
+                        data = json.loads(part.get("text", ""))
+                        if isinstance(data, dict) and "image_path" in data:
+                            self._last_image_path = data["image_path"]
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+        return result
 
     def _handle_implement_skill(self, args: dict[str, Any], new_skills: list[str]) -> str:
-        skill_name = args.get("skill_name", "")
-        description = args.get("description", "")
-
-        if not skill_name or not description:
-            return json.dumps({"error": "skill_name and description are both required"})
-
-        if skill_name in self._registry:
-            entry = self._registry.get(skill_name)
-            return json.dumps({
-                "status": "already_exists",
-                "inputs": entry.cls.Inputs.model_json_schema(),
-                "outputs": entry.cls.Outputs.model_json_schema(),
-            })
-
-        request = ImplementorRequest(
-            proposed_id=skill_name,
-            description=description,
-            rationale="Requested by explorer during exploration phase",
-            side_effects=["screen_capture", "screen_input", "llm_call"],
+        return handle_implement_skill(
+            args,
+            registry=self._registry,
+            implementor=self._implementor,
+            librarian=self._librarian,
+            temp_skills=self._temp_skills,
+            new_skills=new_skills,
         )
 
-        try:
-            result = self._implementor.synthesize(request)
-        except Exception as exc:
-            return json.dumps({"status": "failed", "error": f"Implementor error: {exc}"})
-
-        if result.ok and result.bundle is not None:
-            try:
-                self._implementor.publish_temp(result.bundle)
-                self._librarian.reindex()
-                self._temp_skills.append(skill_name)
-                new_skills.append(skill_name)
-
-                entry = self._registry.get(skill_name)
-                return json.dumps({
-                    "status": "success",
-                    "skill_id": skill_name,
-                    "inputs": entry.cls.Inputs.model_json_schema(),
-                    "outputs": entry.cls.Outputs.model_json_schema(),
-                    "note": "Skill is available for testing. Call register_skill to promote it permanently.",
-                })
-            except Exception as exc:
-                self._implementor.cleanup_temp(skill_name)
-                return json.dumps({"status": "failed", "error": f"Publish error: {exc}"})
-        else:
-            errors = result.test_failures + [str(v) for v in result.violations]
-            return json.dumps({
-                "status": "failed",
-                "errors": errors,
-                "notes": result.notes,
-            })
-
-    def _handle_register_skill(self, args: dict[str, Any]) -> str:
-        skill_name = args.get("skill_name", "")
-        if not skill_name:
-            return json.dumps({"error": "skill_name is required"})
-
-        if skill_name not in self._temp_skills:
-            return json.dumps({
-                "error": f"{skill_name!r} is not a temp skill from this session. "
-                f"Available temp skills: {self._temp_skills}"
-            })
-
-        try:
-            self._implementor.promote_temp(skill_name)
-            self._librarian.reindex()
-            self._temp_skills.remove(skill_name)
-            return json.dumps({
-                "status": "registered",
-                "skill_id": skill_name,
-                "note": "Skill permanently saved to the skills library.",
-            })
-        except Exception as exc:
-            return json.dumps({"status": "failed", "error": str(exc)})
-
     def _handle_revise_skill(self, args: dict[str, Any]) -> str:
-        skill_name = args.get("skill_name", "")
-        feedback = args.get("feedback", "")
-
-        if not skill_name or not feedback:
-            return json.dumps({"error": "skill_name and feedback are both required"})
-
-        if skill_name not in self._temp_skills:
-            return json.dumps({
-                "error": f"{skill_name!r} is not a temp skill from this session. "
-                f"Only skills implemented in this session can be revised. "
-                f"Available temp skills: {self._temp_skills}"
-            })
-
-        try:
-            result = self._implementor.revise(skill_name, feedback)
-        except Exception as exc:
-            return json.dumps({"status": "failed", "error": f"Implementor error: {exc}"})
-
-        if result.ok and result.bundle is not None:
-            try:
-                # Replace the old temp skill with the revised one.
-                self._implementor.publish_temp(result.bundle)
-                self._librarian.reindex()
-                entry = self._registry.get(skill_name)
-                return json.dumps({
-                    "status": "revised",
-                    "skill_id": skill_name,
-                    "inputs": entry.cls.Inputs.model_json_schema(),
-                    "outputs": entry.cls.Outputs.model_json_schema(),
-                    "note": "Skill has been revised and reloaded. Test it again before registering.",
-                })
-            except Exception as exc:
-                return json.dumps({"status": "failed", "error": f"Publish error: {exc}"})
-        else:
-            errors = result.test_failures + [str(v) for v in result.violations]
-            return json.dumps({
-                "status": "failed",
-                "errors": errors,
-                "notes": result.notes,
-            })
+        return handle_revise_skill(
+            args,
+            registry=self._registry,
+            implementor=self._implementor,
+            librarian=self._librarian,
+            temp_skills=self._temp_skills,
+        )

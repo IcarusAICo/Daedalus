@@ -18,18 +18,14 @@ export function useKeybindings(
       process.exit(0);
     }
 
-    // Ctrl+L: stop execution and force learner
-    if (key.ctrl && _input === "l") {
-      if (manager?.isRunning) {
-        manager.forceLearn();
-      }
-      return;
-    }
-
-    // Escape: if config screen is open, let its own handler deal with it
+    // Escape: force learner if running, otherwise exit
     if (key.escape) {
       if (store.showConfig) return;
-      if (!manager?.isRunning && !inputActive) {
+      if (manager?.isRunning) {
+        manager.forceLearn();
+        return;
+      }
+      if (!inputActive) {
         process.exit(0);
       }
       return;

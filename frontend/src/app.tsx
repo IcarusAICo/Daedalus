@@ -44,7 +44,7 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
   const showConfig = useAgentStore((s) => s.showConfig);
   const connected = useAgentStore((s) => s.connected);
   const currentPhase = useAgentStore((s) => s.currentPhase);
-  const phases = useAgentStore((s) => s.phases);
+  const steps = useAgentStore((s) => s.steps);
 
   const [inputMode, setInputMode] = useState<"idle" | "goal" | "test">(goal || tracePath ? "idle" : "goal");
   const [goalInput, setGoalInput] = useState("");
@@ -141,6 +141,7 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
           const agent = raw.agent || {};
           if (agent.max_retries !== undefined) patch.maxRetries = agent.max_retries;
           if (agent.explore_steps !== undefined) patch.exploreSteps = agent.explore_steps;
+          if (agent.learner_steps !== undefined) (patch as any).learnerSteps = agent.learner_steps;
           if (agent.no_strategy !== undefined) patch.noStrategy = agent.no_strategy;
           if (agent.verbose !== undefined) patch.verbose = agent.verbose;
           if (agent.record !== undefined) patch.record = agent.record;
@@ -454,20 +455,19 @@ export function App({ goal, configPath, projectRoot, tracePath }: AppProps): Rea
           <Box flexDirection="column" flexGrow={1}>
             <GoalDisplay goal={storeGoal} isReplay={isReplay} />
             {!pendingConfirm && <ChatFeed />}
-            {!pendingConfirm && phases[currentPhase]?.status === "running" &&
-              (currentPhase === "planner" || currentPhase === "evaluator") && (
-              <Box paddingLeft={2} paddingY={1}>
-                <Text color="cyan"><Spinner type="dots" />{" "}</Text>
-                <Text color="cyan" bold>
-                  {currentPhase === "planner" ? "Planning" : "Evaluating"}
-                </Text>
-                <Text dimColor>
-                  {" — "}{currentPhase === "planner"
-                    ? (phases.planner.summary || "generating program...")
-                    : (phases.evaluator.summary || "checking success criteria...")}
-                </Text>
-              </Box>
-            )}
+            {!pendingConfirm && (() => {
+              const runningStep = steps.find((s) => s.status === "running");
+              if (runningStep && currentPhase === "executor") {
+                return (
+                  <Box paddingLeft={2} paddingY={0}>
+                    <Text color="cyan"><Spinner type="dots" />{" "}</Text>
+                    <Text color="cyan" bold>{runningStep.skillId}</Text>
+                    <Text dimColor>{" — step "}{runningStep.idx}</Text>
+                  </Box>
+                );
+              }
+              return null;
+            })()}
             {pendingConfirm && (
               <ConfirmDialog
                 request={pendingConfirm}

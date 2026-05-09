@@ -1,15 +1,28 @@
 import React from "react";
 import { Box, Text } from "ink";
+import Spinner from "ink-spinner";
 import { useAgentStore } from "../store/agent-store.js";
+import { useElapsedTime } from "../hooks/use-elapsed-time.js";
 
 const PHASE_LABELS: Record<string, string> = {
   idle: "Idle",
   explorer: "Explorer",
   strategy: "Strategy",
   planner: "Planner",
+  resetter: "Resetter",
   executor: "Executor",
   evaluator: "Evaluator",
   learner: "Learner",
+};
+
+const PHASE_SUMMARIES: Record<string, string> = {
+  planner: "generating program...",
+  evaluator: "checking success criteria...",
+  explorer: "exploring environment...",
+  executor: "executing plan...",
+  learner: "analyzing trace...",
+  resetter: "resetting environment...",
+  strategy: "analyzing goal...",
 };
 
 function ContextGauge({ used, max }: { used: number; max: number }): React.ReactElement {
@@ -37,13 +50,17 @@ export function StatusBar({ isReplay }: StatusBarProps): React.ReactElement {
   const error = useAgentStore((s) => s.error);
   const verdict = useAgentStore((s) => s.verdict);
   const contextUsage = useAgentStore((s) => s.contextUsage);
+  const startedAt = useAgentStore((s) => s.startedAt);
+  const elapsed = useElapsedTime(startedAt);
 
   const phase = phases[currentPhase];
+  const isRunning = phase?.status === "running";
   const progressStr = phase?.progress
     ? ` ${phase.progress.current}/${phase.progress.total}`
     : "";
 
   const attemptStr = attempt > 0 ? `  Attempt ${attempt + 1}` : "";
+  const summaryText = phase?.summary || PHASE_SUMMARIES[currentPhase] || "";
 
   const showVerdictInstead = verdict && error;
 
@@ -69,11 +86,12 @@ export function StatusBar({ isReplay }: StatusBarProps): React.ReactElement {
         ) : (
           <Text>
             {isReplay && <Text color="magenta" bold>[Replay] </Text>}
+            {isRunning && <><Text color="cyan"><Spinner type="dots" /></Text><Text> </Text></>}
             <Text color="yellow" bold>
-              [{PHASE_LABELS[currentPhase] ?? currentPhase}]
+              {PHASE_LABELS[currentPhase] ?? currentPhase}
             </Text>
             <Text dimColor>{progressStr}</Text>
-            {phase?.summary && <Text dimColor>{" — "}{phase.summary}</Text>}
+            {summaryText && <Text dimColor>{" — "}{summaryText}</Text>}
             <Text dimColor>{attemptStr}</Text>
           </Text>
         )}
@@ -83,8 +101,9 @@ export function StatusBar({ isReplay }: StatusBarProps): React.ReactElement {
           <ContextGauge used={contextUsage.used} max={contextUsage.max} />
         )}
         {currentPhase === "executor" && (
-          <Text dimColor>Ctrl+L: learn</Text>
+          <Text dimColor>Esc: learn</Text>
         )}
+        {startedAt && <Text bold>{elapsed}</Text>}
         <Text dimColor>Ctrl+C: exit</Text>
       </Box>
     </Box>

@@ -1,15 +1,13 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { useAgentStore } from "../store/agent-store.js";
-import { useElapsedTime } from "../hooks/use-elapsed-time.js";
 
 export function HeaderBar(): React.ReactElement {
   const config = useAgentStore((s) => s.config);
   const configPath = useAgentStore((s) => s.configPath);
   const connected = useAgentStore((s) => s.connected);
-  const startedAt = useAgentStore((s) => s.startedAt);
+  const backendConnected = useAgentStore((s) => s.backendConnected);
   const runMode = useAgentStore((s) => s.runMode);
-  const elapsed = useElapsedTime(startedAt);
 
   const connectionStr =
     config.backend.kind === "vnc"
@@ -17,6 +15,7 @@ export function HeaderBar(): React.ReactElement {
       : "mock://local";
 
   const statusColor = connected ? "green" : "gray";
+  const backendDotColor = backendConnected ? "green" : "red";
   const modeColor = runMode === "explore" ? "magenta" : runMode === "plan" ? "blue" : "green";
 
   return (
@@ -38,9 +37,9 @@ export function HeaderBar(): React.ReactElement {
         )}
       </Box>
       <Text>
+        <Text color={backendDotColor}>●</Text>
+        {" "}
         <Text color={statusColor}>[{connectionStr}]</Text>
-        {"  "}
-        <Text bold>{elapsed}</Text>
       </Text>
     </Box>
   );

@@ -909,6 +909,7 @@ def cmd_run(
                     bridge.emit_event("status_update", {"text": f"Connecting to {host}:{port}..."})
                 explore_be.connect()
                 if bridge:
+                    bridge.emit_backend_status(True)
                     bridge.emit_event("status_update", {"text": "Connected, starting exploration..."})
 
                 implementor = SyntheticSkillImplementor(
@@ -970,6 +971,8 @@ def cmd_run(
                 import contextlib as _ctxlib
                 with _ctxlib.suppress(Exception):
                     explore_be.disconnect()
+                if bridge:
+                    bridge.emit_backend_status(False)
 
                 console.print(
                     f"[green]exploration complete[/green]: "
@@ -1232,7 +1235,27 @@ def cmd_run(
     llm_cfg = _load_llm_config(config)
     skill_gateway = make_gateway(llm_cfg) if llm_cfg else None
 
-    # Step 4: Execute with learner retry loop.
+    # Step 4a: Generate environment reset program (once, reused each attempt).
+    reset_program: "PythonProgram | None" = None
+    if goal and gateway:
+        from daedalus.resetter import Resetter
+        try:
+            resetter = Resetter(gateway=gateway, role="cheap")
+            reset_program = resetter.generate(
+                goal=goal,
+                host_os=host_os,
+                screen_w=plan_w,
+                screen_h=plan_h,
+            )
+            if reset_program:
+                console.print(f"[dim]resetter: generated reset program ({len(reset_program.code)} chars)[/dim]")
+            else:
+                console.print("[dim]resetter: no reset needed[/dim]")
+        except Exception as exc:
+            logging.getLogger(__name__).warning("resetter generation failed: %s", exc)
+            console.print(f"[yellow]resetter generation failed: {exc}[/yellow]")
+
+    # Step 4b: Execute with learner retry loop.
     recorder: _ScreenRecorder | None = None
     for attempt in range(1 + max_retries):
         if bridge:
@@ -1254,6 +1277,10 @@ def cmd_run(
                 trace_dir_str = data.get("trace_dir")
                 if trace_dir_str:
                     bridge.set_run_trace_dir(Path(trace_dir_str))
+            elif kind == "program_started":
+                bridge.emit_backend_status(True)
+            elif kind == "program_finished":
+                bridge.emit_backend_status(False)
             bridge.emit_event(kind, data)
 
         if isinstance(prog, PythonProgram):
@@ -1278,6 +1305,35 @@ def cmd_run(
             )
 
         try:
+            # Run the environment reset program (if generated).
+            if reset_program is not None:
+                if bridge:
+                    bridge.emit_phase("resetter", "running", "resetting environment")
+                console.print("[dim]running reset program...[/dim]")
+                try:
+                    reset_executor = PythonProgramExecutor(
+                        backend=be,
+                        llm=skill_gateway,
+                        traces_root=run_dir / "execution",
+                        tasks_db=db_path,
+                        abort_event=_abort_event,
+                        status_callback=_status_cb,
+                    )
+                    reset_result = reset_executor.run(
+                        reset_program,
+                        program_ref="<resetter>",
+                        task_id=f"reset_attempt_{attempt}",
+                    )
+                    if reset_result.status in ("success", "goal_achieved"):
+                        console.print("[dim]reset complete[/dim]")
+                    else:
+                        console.print(f"[yellow]reset program finished with status: {reset_result.status}[/yellow]")
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("reset execution failed: %s", exc)
+                    console.print(f"[yellow]reset failed (continuing): {exc}[/yellow]")
+                if bridge:
+                    bridge.emit_phase("resetter", "complete")
+
             # Start screen recording if requested.
             if record:
                 rec_tmp = run_dir / "execution" / f"_recording_attempt_{attempt}.mp4"
@@ -1395,6 +1451,7 @@ def cmd_run(
                 console.print("[cyan]analyzing successful trace for optimizations...[/cyan]")
                 if bridge:
                     bridge.emit_phase("learner", "running", "analyzing successful trace")
+                    bridge.emit_backend_status(True)
                     bridge.emit_thinking_clear()
 
                 def _success_learner_stream(text: str) -> None:
@@ -1423,7 +1480,17 @@ def cmd_run(
                             bridge.emit_event("skill_finished", data)
 
                 try:
-                    learner = Learner(gateway=gateway, max_iterations=learner_steps)
+                    learner = Learner(
+                        gateway=gateway,
+                        max_iterations=learner_steps,
+                        backend=be,
+                        registry=get_registry(),
+                        librarian=librarian,
+                        implementor=SyntheticSkillImplementor(gateway=gateway, skills_dir=sk_dir),
+                        skills_dir=sk_dir,
+                        traces_root=run_dir,
+                        tasks_db=db_path,
+                    )
                     feedback = learner.analyze_success(
                         run_dir / "execution" / result.task_id,
                         program=prog,
@@ -1431,6 +1498,7 @@ def cmd_run(
                         tool_callback=_success_tool_callback if bridge else None,
                         explorer_context=memory_context,
                         context_usage_callback=_context_usage if bridge else None,
+                        task_id=f"learner_success_{result.task_id}",
                     )
                     console.print(f"[bold]Learner:[/bold] {feedback.summary}")
                     # Save success learner feedback to trace directory
@@ -1495,6 +1563,7 @@ def cmd_run(
         console.print(f"[yellow]attempt {attempt + 1} failed; entering learner loop...[/yellow]")
         if bridge:
             bridge.emit_phase("learner", "running")
+            bridge.emit_backend_status(True)
             bridge.emit_thinking_clear()
 
         def _learner_stream(text: str) -> None:
@@ -1523,7 +1592,17 @@ def cmd_run(
                     bridge.emit_event("skill_finished", data)
 
         try:
-            learner = Learner(gateway=gateway, max_iterations=learner_steps)
+            learner = Learner(
+                gateway=gateway,
+                max_iterations=learner_steps,
+                backend=be,
+                registry=get_registry(),
+                librarian=librarian,
+                implementor=SyntheticSkillImplementor(gateway=gateway, skills_dir=sk_dir),
+                skills_dir=sk_dir,
+                traces_root=run_dir,
+                tasks_db=db_path,
+            )
             feedback = learner.analyze_failure(
                 run_dir / "execution" / result.task_id,
                 program=prog,
@@ -1531,6 +1610,7 @@ def cmd_run(
                 tool_callback=_learner_tool_callback if bridge else None,
                 explorer_context=memory_context,
                 context_usage_callback=_context_usage if bridge else None,
+                task_id=f"learner_attempt_{attempt}",
             )
         except Exception as exc:
             console.print(f"[red]learner analysis failed: {exc}[/red]")

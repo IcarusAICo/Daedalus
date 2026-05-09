@@ -1,5 +1,10 @@
 <p align="center">
-  <h1 align="center">Daedalus</h1>
+<pre align="center">
+     ___                  __      __
+    / _ \ ___ _ ___  ___ / /___ _/ /__ __ ___
+   / // // _ `// -_)/ _ \ / _ `// // // /(_-<
+  /____/ \_,_/ \__/ \__/_/\_,_//_/ \_,_//___/
+</pre>
   <p align="center"><strong>The computer-control agent that teaches itself.</strong></p>
 </p>
 
@@ -13,7 +18,7 @@
 
 ---
 
-Daedalus drives any desktop (Windows, macOS, Linux) over VNC using LLM-powered planning and a growing library of composable skills. Give it a goal in plain English — it explores the screen, builds a plan, executes it, and **learns from failure**. When something goes wrong, a learner loop analyzes the trace, proposes new skills or fixes, and retries autonomously.
+Daedalus drives any desktop (Windows, macOS, Linux) over VNC (or locally) using LLM-powered planning and a growing library of composable skills. Give it a goal in plain English and it explores the screen, builds a plan, executes it, and **learns from failure**. When something goes wrong, a learner loop analyzes the trace, proposes new skills or fixes, and retries autonomously.
 
 No hard-coded workflows. No brittle selectors. Just vision, reasoning, and a skill library that grows with every run.
 
@@ -25,7 +30,7 @@ No hard-coded workflows. No brittle selectors. Just vision, reasoning, and a ski
 | **Composable skill library** | 18 built-in skills (click, type, scroll, vision queries, element location, etc.) plus any the agent creates at runtime. |
 | **Any desktop, any OS** | Connects over VNC — works with Windows, macOS, and Linux targets from a single control plane. |
 | **Full observability** | Every run produces a trace with screenshots, LLM exchanges, timing data, and optional screen recordings. |
-| **Human-in-the-loop** | Plans require approval before execution. New skills require approval before adoption. Abort anytime with a hotkey. |
+| **Human-in-the-loop** | Plans require approval before execution. Abort anytime with a hotkey. |
 
 ---
 

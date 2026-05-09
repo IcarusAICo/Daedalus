@@ -20,6 +20,7 @@ const INITIAL_PHASES: AgentState["phases"] = {
   explorer: { id: "explorer", status: "pending" },
   strategy: { id: "strategy", status: "pending" },
   planner: { id: "planner", status: "pending" },
+  resetter: { id: "resetter", status: "pending" },
   executor: { id: "executor", status: "pending" },
   evaluator: { id: "evaluator", status: "pending" },
   learner: { id: "learner", status: "pending" },
@@ -43,6 +44,7 @@ interface AgentActions {
   pushChat: (msg: ChatMessage) => void;
   updateChat: (id: string, updates: Partial<ChatMessage>) => void;
   setConnected: (connected: boolean) => void;
+  setBackendConnected: (connected: boolean) => void;
   setStarted: (taskId: string) => void;
   setAttempt: (attempt: number) => void;
   setError: (error: string | null) => void;
@@ -74,6 +76,7 @@ const defaultConfig: DaedalusConfig = {
   },
   maxRetries: 3,
   exploreSteps: 20,
+  learnerSteps: 15,
   record: false,
   recordFps: 30,
   skillsDir: "./skills",
@@ -102,6 +105,7 @@ const INITIAL_STATE: AgentState = {
   chatMessages: [],
   config: defaultConfig,
   connected: false,
+  backendConnected: false,
   startedAt: null,
   taskId: null,
   attempt: 0,
@@ -200,6 +204,8 @@ export const useAgentStore = create<AgentStore>((set) => ({
     })),
 
   setConnected: (connected) => set({ connected }),
+
+  setBackendConnected: (connected) => set({ backendConnected: connected }),
 
   setStarted: (taskId) =>
     set({ taskId, startedAt: new Date().toISOString() }),

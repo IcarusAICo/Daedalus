@@ -173,6 +173,10 @@ export function applyEvent(event: TraceEvent, store?: Store): void {
         event.data.total as number
       );
       break;
+
+    case "backend_status":
+      s.setBackendConnected(event.data.connected as boolean);
+      break;
   }
 }
 

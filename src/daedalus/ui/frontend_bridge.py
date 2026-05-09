@@ -219,6 +219,10 @@ class FrontendBridge:
     def emit_executor_progress(self, current: int, total: int) -> None:
         self.emit_event("executor_progress", {"current": current, "total": total})
 
+    def emit_backend_status(self, connected: bool) -> None:
+        """Emit VNC/mock backend connection status to the frontend."""
+        self.emit_event("backend_status", {"connected": connected})
+
     # ------------------------------------------------------------------
     # Confirmation requests
     # ------------------------------------------------------------------

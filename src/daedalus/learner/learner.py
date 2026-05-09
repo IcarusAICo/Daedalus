@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable
@@ -33,10 +34,24 @@ from daedalus.learner.analysis import (
     analyze_traces,
 )
 from daedalus.learner.tools import ALL_TOOLS, TraceContext, dispatch_tool
+from daedalus.shared.skill_caller import (
+    TOOL_IMPLEMENT_SKILL,
+    TOOL_REVISE_SKILL,
+    handle_implement_skill,
+    handle_revise_skill,
+    handle_skill_call,
+    skill_to_tool_def,
+)
 
 log = logging.getLogger(__name__)
 
 DEFAULT_MAX_ITERATIONS = 15
+
+
+def _now_compact() -> str:
+    """Return a compact timestamp string for unique IDs (YYYYMMDD_HHMMSS)."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 class LearnerError(DaedalusError):
@@ -129,6 +144,9 @@ class LearnerFeedback(BaseModel):
     new_skill_candidates: list[NewSkillCandidate] = Field(default_factory=list)
     skill_amendments: list[SkillAmendment] = Field(default_factory=list)
     revised_plan_hints: str = ""
+    debug_session_results: list[dict[str, Any]] | None = None
+    implemented_skills: list[str] = Field(default_factory=list)
+    skill_revisions: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +233,113 @@ new wrapper skill.
 
 Provide evidence from the trace (event line numbers, screenshots) to support
 the amendment.
+"""
+
+_LEARNER_LIVE_SYSTEM_PROMPT = """\
+You are the Learner for Daedalus, a computer-control agent. A plan just FAILED \
+and you have a LIVE connection to the VM. Your goal is to diagnose WHY it \
+failed and produce TESTED, CONCRETE fixes.
+
+DO NOT just passively read the trace and describe what went wrong. You must \
+actively TEST your hypotheses on the live VM, implement or revise skills to \
+harden them, and report what concretely works.
+
+WORKFLOW
+--------
+1. Review the failure context (trace summary, events around the failure point) \
+to form a hypothesis about what went wrong.
+2. Call view_screen() to see the CURRENT state of the VM.
+3. REPRODUCE the failure: try the action that failed (click_element, \
+locate_element, etc.) to confirm the root cause.
+4. TEST fixes interactively: try alternative approaches (dismiss dialogs, \
+use different selectors, try keyboard shortcuts) until you find what works.
+5. If a skill is fragile, call implement_skill or revise_skill to create a \
+hardened version that handles the failure condition. Then TEST IT LIVE.
+6. If you need to reproduce failure step-by-step, use debug_plan with \
+breakpoints at the suspected failure step.
+7. Call learning_done with your diagnosis BACKED BY LIVE EVIDENCE of what works.
+
+CRITICAL RULES
+--------------
+- Your suggestions MUST be backed by live testing. Don't just say "try clicking X" \
+-- actually click X and report what happened.
+- If you implement or revise a skill, you MUST test it on the live VM before \
+recommending it.
+- Use the trace tools (get_trace_summary, get_events, view_screenshot, \
+get_event_field, get_program) to understand context, but spend the MAJORITY \
+of your iterations on live VM interaction.
+- If you identify a fragile skill, harden it: add error handling for popups, \
+focus loss, blocking dialogs, etc. Test the hardened version.
+- When you call learning_done, include specific evidence: "I tested X and it \
+worked/failed because Y."
+
+AVAILABLE TOOLS
+---------------
+Live VM interaction:
+- view_screen, click_element, type_text, type_shortcut, scroll, mouse, wait, \
+locate_element, locate_elements, vision_query, extract_text, assert_screen_contains
+- implement_skill: create a new reusable skill and test it
+- revise_skill: fix a skill you implemented this session
+
+Debugging:
+- debug_plan: re-execute the plan with breakpoints for step-by-step debugging
+- debug_continue, debug_step, debug_stop: control the debug session
+
+Trace inspection (for context):
+- get_trace_summary, get_events, get_event_field, view_screenshot, \
+list_screenshots, get_program
+
+Proposals (use after testing):
+- propose_new_skill, propose_skill_amendment, learning_done
+
+SKILL HARDENING
+---------------
+If a skill fails due to environmental conditions (popups, focus loss, overlays, \
+unexpected state), you should:
+1. Identify the condition that caused failure (test it live)
+2. Call revise_skill or implement_skill to handle that condition
+3. Test the hardened version on the live VM
+4. Include the hardened skill in your feedback
+
+{skill_discipline}
+
+LLM COORDINATE SCALING
+-----------------------
+Screenshots are downscaled to the LLM's internal processing resolution. All \
+coordinates across skills (view_screen, locate_element, click_element, mouse) \
+use the same consistent downscaled coordinate space. The mouse skill \
+automatically scales coordinates back up. Just use coordinates as you see them.
+"""
+
+_LEARNER_LIVE_FAILURE_USER_MSG = """\
+The plan just FAILED. Here is the execution context:
+
+Task ID: {task_id}
+Task Name: {task_name}
+Status: {status}
+Duration: {duration_ms:.0f}ms
+Events: {event_count}
+Screenshots: {screenshot_count}
+
+Your job: diagnose the failure, reproduce it on the live VM, test fixes, \
+harden any fragile skills, and report what concretely works. Start by \
+reviewing the trace context (get_trace_summary), then immediately move to \
+live VM interaction.
+"""
+
+_LEARNER_LIVE_SUCCESS_USER_MSG = """\
+The plan SUCCEEDED but may have inefficiencies. Here is the execution context:
+
+Task ID: {task_id}
+Task Name: {task_name}
+Status: {status}
+Duration: {duration_ms:.0f}ms
+Events: {event_count}
+Screenshots: {screenshot_count}
+
+Your job: identify optimization opportunities and test whether skills can be \
+improved or consolidated. Use the live VM to verify your hypotheses about \
+unnecessary steps or slow interactions.
 """
 
 _FAILURE_USER_MSG = """\
@@ -366,7 +491,11 @@ def _parse_report(content: str) -> LearnerReport:
 
 
 class Learner:
-    """Iterative tool-calling learner that investigates traces interactively."""
+    """Iterative tool-calling learner that investigates traces interactively.
+
+    When live_mode=True, the learner also has access to the VM via skills,
+    can implement/revise temp skills, and can debug plans step-by-step.
+    """
 
     def __init__(
         self,
@@ -375,11 +504,173 @@ class Learner:
         role: str = "learner",
         max_iterations: int = DEFAULT_MAX_ITERATIONS,
         verbose: bool = False,
+        # Live mode dependencies (all optional -- None means offline-only)
+        backend: Any | None = None,
+        registry: Any | None = None,
+        librarian: Any | None = None,
+        implementor: Any | None = None,
+        skills_dir: Path | None = None,
+        traces_root: Path | None = None,
+        tasks_db: Path | None = None,
     ) -> None:
         self._gateway = gateway
         self._role = role
         self._max_iterations = max_iterations
         self._verbose = verbose
+        # Live mode
+        self._backend = backend
+        self._registry = registry
+        self._librarian = librarian
+        self._implementor = implementor
+        self._skills_dir = skills_dir
+        self._traces_root = traces_root or Path("traces")
+        self._tasks_db = tasks_db
+        self._temp_skills: list[str] = []
+        self._new_skills: list[str] = []
+        self._debugger: Any | None = None
+
+    @property
+    def live_mode(self) -> bool:
+        """True if the learner has live VM access."""
+        return self._backend is not None and self._registry is not None
+
+    def _build_tools(self) -> list[dict[str, Any]]:
+        """Build the full tool list based on mode (trace-only or live)."""
+        tools = list(ALL_TOOLS)
+        if self.live_mode:
+            for entry in self._registry:
+                if entry.cls.SPEC.kind == "daemon":
+                    continue
+                tools.append(skill_to_tool_def(entry))
+            tools.append(TOOL_IMPLEMENT_SKILL)
+            tools.append(TOOL_REVISE_SKILL)
+            from daedalus.learner.debugger import TOOL_DEBUG_PLAN, TOOL_DEBUG_CONTINUE, TOOL_DEBUG_STEP, TOOL_DEBUG_STOP
+            tools.append(TOOL_DEBUG_PLAN)
+            tools.append(TOOL_DEBUG_CONTINUE)
+            tools.append(TOOL_DEBUG_STEP)
+            tools.append(TOOL_DEBUG_STOP)
+        return tools
+
+    def _get_execution_context(self, tracer: Any) -> Any:
+        """Build an ExecutionContext for live skill calls using the provided tracer."""
+        from daedalus.core.context import ExecutionContext, TaskState, compute_coordinate_scale
+        from daedalus.core.store import RunStore
+
+        screen_w, screen_h = self._backend.size if hasattr(self._backend, "size") else (1728, 1117)
+        task_id = tracer.task_id
+        db_path = self._tasks_db or self._traces_root / "tasks.db"
+        state = TaskState(db_path, task_id)
+        store = RunStore(db_path, task_id)
+
+        return ExecutionContext(
+            task_id=task_id,
+            backend=self._backend,
+            task_state=state,
+            tracer=tracer,
+            store=store,
+            llm=self._gateway,
+            abort_event=threading.Event(),
+            coordinate_scale=compute_coordinate_scale(screen_w),
+        )
+
+    def _dispatch_live_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        exec_ctx: Any,
+        trace_ctx: TraceContext,
+    ) -> tuple[str | list[dict[str, Any]], bool]:
+        """Dispatch a tool call -- tries trace tools first, then live tools."""
+        from daedalus.learner.tools import _HANDLERS
+
+        # Trace-inspection tools
+        if tool_name in _HANDLERS:
+            return dispatch_tool(tool_name, arguments, trace_ctx)
+
+        # Debugger tools
+        if tool_name in ("debug_plan", "debug_continue", "debug_step", "debug_stop"):
+            return self._dispatch_debug_tool(tool_name, arguments, exec_ctx, trace_ctx)
+
+        # Implement/revise skill
+        if tool_name == "implement_skill":
+            result = handle_implement_skill(
+                arguments,
+                registry=self._registry,
+                implementor=self._implementor,
+                librarian=self._librarian,
+                temp_skills=self._temp_skills,
+                new_skills=self._new_skills,
+            )
+            return result, False
+
+        if tool_name == "revise_skill":
+            result = handle_revise_skill(
+                arguments,
+                registry=self._registry,
+                implementor=self._implementor,
+                librarian=self._librarian,
+                temp_skills=self._temp_skills,
+            )
+            return result, False
+
+        # All other tool names are skill IDs
+        result = handle_skill_call(tool_name, arguments, exec_ctx, self._registry)
+        return result, False
+
+    def _dispatch_debug_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        exec_ctx: Any,
+        trace_ctx: TraceContext,
+    ) -> tuple[str, bool]:
+        """Handle debug_plan/continue/step/stop tool calls."""
+        from daedalus.learner.debugger import PlanDebugger
+
+        if tool_name == "debug_plan":
+            if self._debugger is not None:
+                return json.dumps({"error": "A debug session is already active. Call debug_stop first."}), False
+            plan_source = arguments.get("plan_source", "latest")
+            breakpoints = arguments.get("breakpoints", [])
+            break_on_error = arguments.get("break_on_error", True)
+
+            program_code = trace_ctx.program_text
+            if not program_code:
+                return json.dumps({"error": "No program found in the trace to debug."}), False
+
+            self._debugger = PlanDebugger(
+                program_code=program_code,
+                backend=self._backend,
+                registry=self._registry,
+                gateway=self._gateway,
+                traces_root=self._traces_root,
+                tasks_db=self._tasks_db,
+                breakpoints=breakpoints,
+                break_on_error=break_on_error,
+            )
+            result = self._debugger.start()
+            return json.dumps(result, default=str), False
+
+        if tool_name == "debug_continue":
+            if self._debugger is None:
+                return json.dumps({"error": "No active debug session. Call debug_plan first."}), False
+            result = self._debugger.continue_execution()
+            return json.dumps(result, default=str), False
+
+        if tool_name == "debug_step":
+            if self._debugger is None:
+                return json.dumps({"error": "No active debug session. Call debug_plan first."}), False
+            result = self._debugger.step()
+            return json.dumps(result, default=str), False
+
+        if tool_name == "debug_stop":
+            if self._debugger is None:
+                return json.dumps({"error": "No active debug session."}), False
+            result = self._debugger.stop()
+            self._debugger = None
+            return json.dumps(result, default=str), False
+
+        return json.dumps({"error": f"Unknown debug tool: {tool_name}"}), False
 
     # -- Batch heuristic analysis (unchanged, no tool loop) ----------------
 
@@ -416,9 +707,10 @@ class Learner:
         tool_callback: Callable[[str, str, dict, str | None, str | None], None] | None = None,
         explorer_context: str | None = None,
         context_usage_callback: Callable[[int, int], None] | None = None,
+        task_id: str | None = None,
     ) -> LearnerFeedback:
         """Analyze a failed trace using an iterative tool-calling loop."""
-        return self._analyze_trace(task_dir, program, mode="failure", stream_callback=stream_callback, tool_callback=tool_callback, explorer_context=explorer_context, context_usage_callback=context_usage_callback)
+        return self._analyze_trace(task_dir, program, mode="failure", stream_callback=stream_callback, tool_callback=tool_callback, explorer_context=explorer_context, context_usage_callback=context_usage_callback, task_id=task_id)
 
     def analyze_success(
         self,
@@ -428,9 +720,10 @@ class Learner:
         tool_callback: Callable[[str, str, dict, str | None, str | None], None] | None = None,
         explorer_context: str | None = None,
         context_usage_callback: Callable[[int, int], None] | None = None,
+        task_id: str | None = None,
     ) -> LearnerFeedback:
         """Analyze a successful trace for optimization opportunities."""
-        return self._analyze_trace(task_dir, program, mode="success", stream_callback=stream_callback, tool_callback=tool_callback, explorer_context=explorer_context, context_usage_callback=context_usage_callback)
+        return self._analyze_trace(task_dir, program, mode="success", stream_callback=stream_callback, tool_callback=tool_callback, explorer_context=explorer_context, context_usage_callback=context_usage_callback, task_id=task_id)
 
     def _analyze_trace(
         self,
@@ -441,34 +734,83 @@ class Learner:
         tool_callback: Callable[[str, str, dict, str | None, str | None], None] | None = None,
         explorer_context: str | None = None,
         context_usage_callback: Callable[[int, int], None] | None = None,
+        task_id: str | None = None,
     ) -> LearnerFeedback:
         """Core tool-calling loop for single-trace analysis."""
         program_text = _program_to_summary(program) if program else None
         trace_ctx = TraceContext(task_dir, program_text=program_text)
 
+        # Set up live execution context if in live mode
+        exec_ctx = None
+        tracer = None
+        if self.live_mode:
+            if not self._backend.is_connected:
+                self._backend.connect()
+            if self._implementor:
+                self._implementor.cleanup_temp()
+            self._temp_skills.clear()
+            self._new_skills.clear()
+
+            # Create the TraceRecorder ONCE with a unique task_id
+            from daedalus.tracing.recorder import TraceRecorder
+            learner_task_id = task_id or f"learner_{_now_compact()}"
+            db_path = self._tasks_db or self._traces_root / "tasks.db"
+            tracer = TraceRecorder(
+                traces_root=self._traces_root,
+                db_path=db_path,
+                task_name="learner",
+                task_id=learner_task_id,
+            )
+            tracer.start()
+            exec_ctx = self._get_execution_context(tracer)
+
         summary = trace_ctx.summary
-        if mode == "failure":
-            user_msg = _FAILURE_USER_MSG.format(
-                task_id=summary.task_id,
-                task_name=summary.name,
-                status=summary.status,
-                duration_ms=summary.total_duration_ms,
-                event_count=summary.event_count,
-                screenshot_count=summary.screenshot_count,
+        if self.live_mode:
+            # Live mode: use the explorer-style active prompt
+            if mode == "failure":
+                user_msg = _LEARNER_LIVE_FAILURE_USER_MSG.format(
+                    task_id=summary.task_id,
+                    task_name=summary.name,
+                    status=summary.status,
+                    duration_ms=summary.total_duration_ms,
+                    event_count=summary.event_count,
+                    screenshot_count=summary.screenshot_count,
+                )
+            else:
+                user_msg = _LEARNER_LIVE_SUCCESS_USER_MSG.format(
+                    task_id=summary.task_id,
+                    task_name=summary.name,
+                    status=summary.status,
+                    duration_ms=summary.total_duration_ms,
+                    event_count=summary.event_count,
+                    screenshot_count=summary.screenshot_count,
+                )
+            system_prompt = _LEARNER_LIVE_SYSTEM_PROMPT.format(
+                skill_discipline=_SKILL_DISCIPLINE,
             )
         else:
-            user_msg = _SUCCESS_USER_MSG.format(
-                task_id=summary.task_id,
-                task_name=summary.name,
-                status=summary.status,
-                duration_ms=summary.total_duration_ms,
-                event_count=summary.event_count,
-                screenshot_count=summary.screenshot_count,
+            # Offline mode: trace-analysis focused prompt
+            if mode == "failure":
+                user_msg = _FAILURE_USER_MSG.format(
+                    task_id=summary.task_id,
+                    task_name=summary.name,
+                    status=summary.status,
+                    duration_ms=summary.total_duration_ms,
+                    event_count=summary.event_count,
+                    screenshot_count=summary.screenshot_count,
+                )
+            else:
+                user_msg = _SUCCESS_USER_MSG.format(
+                    task_id=summary.task_id,
+                    task_name=summary.name,
+                    status=summary.status,
+                    duration_ms=summary.total_duration_ms,
+                    event_count=summary.event_count,
+                    screenshot_count=summary.screenshot_count,
+                )
+            system_prompt = _LEARNER_SYSTEM_PROMPT.format(
+                skill_discipline=_SKILL_DISCIPLINE,
             )
-
-        system_prompt = _LEARNER_SYSTEM_PROMPT.format(
-            skill_discipline=_SKILL_DISCIPLINE,
-        )
 
         if explorer_context:
             user_msg += (
@@ -483,9 +825,11 @@ class Learner:
             {"role": "user", "content": user_msg},
         ]
 
+        tools = self._build_tools()
         new_skill_candidates: list[NewSkillCandidate] = []
         skill_amendments: list[SkillAmendment] = []
         feedback: LearnerFeedback | None = None
+        total_tool_calls = 0
 
         for iteration in range(self._max_iterations):
             if self._verbose:
@@ -505,7 +849,7 @@ class Learner:
                     LLMCall(
                         role=self._role,
                         messages=messages,
-                        tools=ALL_TOOLS,
+                        tools=tools,
                     )
                 )
             except Exception as exc:
@@ -527,6 +871,7 @@ class Learner:
                     new_skill_candidates=new_skill_candidates,
                     skill_amendments=skill_amendments,
                     revised_plan_hints="",
+                    implemented_skills=list(self._new_skills),
                 )
                 break
 
@@ -543,26 +888,60 @@ class Learner:
 
             done = False
             for tc in response.tool_calls:
+                total_tool_calls += 1
+
                 if self._verbose:
                     args_preview = json.dumps(tc.arguments, default=str)
                     if len(args_preview) > 200:
                         args_preview = args_preview[:200] + "..."
                     log.info("learner tool_call: %s(%s)", tc.name, args_preview)
 
+                # Emit tool_call event to tracer
+                if tracer:
+                    tracer.emit("tool_call", {
+                        "iteration": iteration + 1,
+                        "call_index": total_tool_calls,
+                        "tool": tc.name,
+                        "arguments": tc.arguments,
+                    })
+
                 if tool_callback:
                     tool_callback(tc.name, tc.id, tc.arguments, None, None)
 
-                result_content, is_done = dispatch_tool(tc.name, tc.arguments, trace_ctx)
+                # Dispatch: live mode uses combined dispatcher, otherwise trace-only
+                if self.live_mode:
+                    result_content, is_done = self._dispatch_live_tool(
+                        tc.name, tc.arguments, exec_ctx, trace_ctx
+                    )
+                else:
+                    result_content, is_done = dispatch_tool(tc.name, tc.arguments, trace_ctx)
 
                 result_str = result_content if isinstance(result_content, str) else "[image content]"
+
+                # Emit tool_result event to tracer
+                if tracer:
+                    trace_result = result_str if isinstance(result_str, str) else "[multimodal content with image]"
+                    tracer.emit("tool_result", {
+                        "iteration": iteration + 1,
+                        "call_index": total_tool_calls,
+                        "tool": tc.name,
+                        "result": trace_result[:500] if len(trace_result) > 500 else trace_result,
+                        "done": is_done,
+                    })
+
                 if tool_callback:
                     image_path = None
-                    if tc.name == "view_screenshot" and isinstance(result_content, list):
+                    if isinstance(result_content, list):
                         for part in result_content:
                             if isinstance(part, dict) and part.get("type") == "text":
                                 text_val = part.get("text", "")
-                                if "(" in text_val and text_val.rstrip(")").rsplit("(", 1)[-1].startswith("/"):
-                                    image_path = text_val.rstrip(")").rsplit("(", 1)[-1]
+                                try:
+                                    data = json.loads(text_val)
+                                    if isinstance(data, dict) and "image_path" in data:
+                                        image_path = data["image_path"]
+                                except (json.JSONDecodeError, TypeError):
+                                    if "(" in text_val and text_val.rstrip(")").rsplit("(", 1)[-1].startswith("/"):
+                                        image_path = text_val.rstrip(")").rsplit("(", 1)[-1]
                     tool_callback(tc.name, tc.id, tc.arguments, result_str[:200] if isinstance(result_str, str) else result_str, image_path)
 
                 # Collect proposals from proposal tools
@@ -611,8 +990,13 @@ class Learner:
                         new_skill_candidates=new_skill_candidates,
                         skill_amendments=skill_amendments,
                         revised_plan_hints=args.get("revised_plan_hints", ""),
+                        implemented_skills=list(self._new_skills),
                     )
                     done = True
+
+                # Rebuild tools if new skills were implemented
+                if tc.name == "implement_skill" and self.live_mode:
+                    tools = self._build_tools()
 
                 # Build the tool result message
                 if isinstance(result_content, list):
@@ -634,17 +1018,30 @@ class Learner:
             if done:
                 break
         else:
-            # Max iterations reached — force a summary
             if self._verbose:
                 log.info("learner reached max iterations, forcing summary")
-            feedback = self._force_summary(messages, new_skill_candidates, skill_amendments)
+            feedback = self._force_summary(messages, new_skill_candidates, skill_amendments, tools)
 
         if feedback is None:
             feedback = LearnerFeedback(
                 summary="Learner completed without producing structured feedback.",
                 new_skill_candidates=new_skill_candidates,
                 skill_amendments=skill_amendments,
+                implemented_skills=list(self._new_skills),
             )
+
+        # Clean up debugger if still active
+        if self._debugger is not None:
+            try:
+                self._debugger.stop()
+            except Exception:
+                pass
+            self._debugger = None
+
+        # Finalize the tracer
+        if tracer:
+            status = "success" if feedback and feedback.summary else "failed"
+            tracer.finish(status)
 
         return feedback
 
@@ -653,8 +1050,11 @@ class Learner:
         messages: list[dict[str, Any]],
         new_skill_candidates: list[NewSkillCandidate],
         skill_amendments: list[SkillAmendment],
+        tools: list[dict[str, Any]] | None = None,
     ) -> LearnerFeedback:
         """Send a final message asking the learner to summarize findings."""
+        if tools is None:
+            tools = list(ALL_TOOLS)
         if messages and messages[-1].get("role") in ("tool",):
             messages.append({
                 "role": "assistant",
@@ -674,7 +1074,7 @@ class Learner:
                 LLMCall(
                     role=self._role,
                     messages=messages,
-                    tools=ALL_TOOLS,
+                    tools=tools,
                 )
             )
         except Exception:
@@ -682,6 +1082,7 @@ class Learner:
                 summary="Learner reached iteration limit and failed to summarize.",
                 new_skill_candidates=new_skill_candidates,
                 skill_amendments=skill_amendments,
+                implemented_skills=list(self._new_skills),
             )
 
         if response.tool_calls:
@@ -708,5 +1109,6 @@ class Learner:
             summary=response.content.strip() or "Learner reached iteration limit.",
             new_skill_candidates=new_skill_candidates,
             skill_amendments=skill_amendments,
+            implemented_skills=list(self._new_skills),
         )
 

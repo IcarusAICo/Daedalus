@@ -10,6 +10,7 @@ from daedalus.learner.analysis import (
     analyze_traces,
     load_trace,
 )
+from daedalus.learner.debugger import PlanDebugger
 from daedalus.learner.learner import (
     EfficiencyWin,
     FailureProposal,
@@ -31,6 +32,7 @@ __all__ = [
     "LearnerSuggestion",
     "NewSkillCandidate",
     "Ngram",
+    "PlanDebugger",
     "SkillAmendment",
     "SkillFailure",
     "SkillTiming",
