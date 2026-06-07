@@ -56,3 +56,4 @@ services/grounding/weights/
 .env.local
 *.pem
 credentials.json
+env.sh
